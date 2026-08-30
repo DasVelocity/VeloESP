@@ -432,6 +432,21 @@ local Defaults = {
 		CenterOffset = 420,
 		Size = 36,
 	},
+	EdgeBeacon = {
+		Enabled = false,
+		Color = Color3.new(1, 1, 1),
+		Margin = 28,
+		Length = 44,
+		Thickness = 4,
+		DotSize = 11,
+		Pulse = true,
+		PulseSpeed = 2.4,
+		Label = true,
+		Distance = true,
+		TextSize = 12,
+		Transparency = 0,
+		PulseTransparency = 0.78,
+	},
 	Box2D = {
 		Enabled = false,
 		Color = Color3.new(1, 1, 1),
@@ -451,6 +466,7 @@ local Defaults = {
 		Color = Color3.new(1, 1, 1),
 		Thickness = 1,
 		Transparency = 0,
+		UpdateRate = 0.045,
 	},
 	Fade = {
 		Enabled = false,
@@ -519,7 +535,7 @@ local SkeletonSegments = {
 }
 
 local VeloESP = {
-	Version = "5.0.0",
+	Version = "5.1.0",
 	_Destroyed = false,
 	_Objects = setmetatable({}, { __mode = "k" }),
 	_ObjectList = {},
@@ -543,10 +559,11 @@ local VeloESP = {
 		Distance = true,
 		Highlighters = true,
 		Tracers = true,
-		Arrows = true,
+		Arrows = false,
+		EdgeBeacons = true,
 		Boxes2D = true,
 		Boxes3D = true,
-		Skeleton = true,
+		Skeleton = false,
 		Font = Enum.Font.RobotoMono,
 		TextSize = 14,
 		UpdateRate = 0,
@@ -583,6 +600,7 @@ local function NormalizeOptions(Target, Options)
 
 	Final.Tracer = BuildComponentSettings(Final.Tracer, Defaults.Tracer)
 	Final.Arrow = BuildComponentSettings(Final.Arrow, Defaults.Arrow)
+	Final.EdgeBeacon = BuildComponentSettings(Final.EdgeBeacon or Final.Arrow, Defaults.EdgeBeacon)
 	Final.Box2D = BuildComponentSettings(Final.Box2D or Final.Box, Defaults.Box2D)
 	Final.Box3D = BuildComponentSettings(Final.Box3D, Defaults.Box3D)
 	Final.Skeleton = BuildComponentSettings(Final.Skeleton, Defaults.Skeleton)
@@ -617,6 +635,15 @@ local function NormalizeOptions(Target, Options)
 	Final.OutlineTransparency = ClampNumber(Final.OutlineTransparency, 0, 1, Defaults.OutlineTransparency)
 	Final.TextTransparency = ClampNumber(Final.TextTransparency, 0, 1, Defaults.TextTransparency)
 	Final.TextStrokeTransparency = ClampNumber(Final.TextStrokeTransparency, 0, 1, Defaults.TextStrokeTransparency)
+	Final.EdgeBeacon.Margin = math.max(0, tonumber(Final.EdgeBeacon.Margin) or Defaults.EdgeBeacon.Margin)
+	Final.EdgeBeacon.Length = math.max(8, tonumber(Final.EdgeBeacon.Length) or Defaults.EdgeBeacon.Length)
+	Final.EdgeBeacon.Thickness = math.max(1, tonumber(Final.EdgeBeacon.Thickness) or Defaults.EdgeBeacon.Thickness)
+	Final.EdgeBeacon.DotSize = math.max(2, tonumber(Final.EdgeBeacon.DotSize) or Defaults.EdgeBeacon.DotSize)
+	Final.EdgeBeacon.PulseSpeed = math.max(0, tonumber(Final.EdgeBeacon.PulseSpeed) or Defaults.EdgeBeacon.PulseSpeed)
+	Final.EdgeBeacon.TextSize = math.max(8, tonumber(Final.EdgeBeacon.TextSize) or Defaults.EdgeBeacon.TextSize)
+	Final.EdgeBeacon.Transparency = ClampNumber(Final.EdgeBeacon.Transparency, 0, 1, Defaults.EdgeBeacon.Transparency)
+	Final.EdgeBeacon.PulseTransparency = ClampNumber(Final.EdgeBeacon.PulseTransparency, 0, 1, Defaults.EdgeBeacon.PulseTransparency)
+	Final.Skeleton.UpdateRate = math.max(0, tonumber(Final.Skeleton.UpdateRate) or Defaults.Skeleton.UpdateRate)
 	Final.Fade.Speed = math.max(0, tonumber(Final.Fade.Speed) or Defaults.Fade.Speed)
 	Final.Fade.InSpeed = math.max(0, tonumber(Final.Fade.InSpeed) or Final.Fade.Speed)
 	Final.Fade.OutSpeed = math.max(0, tonumber(Final.Fade.OutSpeed) or Final.Fade.Speed)
@@ -808,19 +835,77 @@ end
 
 function ESP:_CreateOverlay()
 	self.UI.Tracer = CreateLine(OverlayRoot, "Tracer")
-	self.UI.Arrow = New("TextLabel", {
+
+	local EdgeBeacon = New("Frame", {
 		Parent = OverlayRoot,
-		Name = "Arrow",
+		Name = "EdgeBeacon",
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		Font = Enum.Font.GothamBold,
-		Text = ">",
-		TextColor3 = self.CurrentSettings.Color,
-		TextScaled = true,
-		TextStrokeTransparency = 0,
+		Size = UDim2.fromOffset(132, 54),
 		Visible = false,
 	})
+
+	local BeaconStem = New("Frame", {
+		Parent = EdgeBeacon,
+		Name = "Stem",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = self.CurrentSettings.Color,
+		BorderSizePixel = 0,
+		Position = UDim2.fromOffset(66, 18),
+	})
+	New("UICorner", {
+		Parent = BeaconStem,
+		CornerRadius = UDim.new(1, 0),
+	})
+
+	local BeaconPulse = New("Frame", {
+		Parent = EdgeBeacon,
+		Name = "Pulse",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = self.CurrentSettings.Color,
+		BorderSizePixel = 0,
+		Position = UDim2.fromOffset(66, 18),
+	})
+	New("UICorner", {
+		Parent = BeaconPulse,
+		CornerRadius = UDim.new(1, 0),
+	})
+
+	local BeaconDot = New("Frame", {
+		Parent = EdgeBeacon,
+		Name = "Dot",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundColor3 = self.CurrentSettings.Color,
+		BorderSizePixel = 0,
+		Position = UDim2.fromOffset(66, 18),
+	})
+	New("UICorner", {
+		Parent = BeaconDot,
+		CornerRadius = UDim.new(1, 0),
+	})
+
+	local BeaconLabel = New("TextLabel", {
+		Parent = EdgeBeacon,
+		Name = "Label",
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		Font = Enum.Font.RobotoMono,
+		Position = UDim2.fromOffset(0, 30),
+		Size = UDim2.fromOffset(132, 20),
+		Text = "",
+		TextColor3 = self.CurrentSettings.Color,
+		TextStrokeTransparency = 0.4,
+		TextXAlignment = Enum.TextXAlignment.Center,
+	})
+
+	self.UI.EdgeBeacon = {
+		Root = EdgeBeacon,
+		Stem = BeaconStem,
+		Pulse = BeaconPulse,
+		Dot = BeaconDot,
+		Label = BeaconLabel,
+	}
 
 	local Box = New("Frame", {
 		Parent = OverlayRoot,
@@ -890,8 +975,8 @@ function ESP:_HideAll()
 		self.UI.Tracer.Visible = false
 	end
 
-	if self.UI.Arrow then
-		self.UI.Arrow.Visible = false
+	if self.UI.EdgeBeacon and self.UI.EdgeBeacon.Root then
+		self.UI.EdgeBeacon.Root.Visible = false
 	end
 
 	if self.UI.Box then
@@ -1126,16 +1211,17 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	Tracer.BackgroundTransparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
 end
 
-function ESP:_UpdateArrow(Visible, OnScreen, ScreenPosition, Alpha)
-	local Arrow = self.UI.Arrow
-	local Settings = self.CurrentSettings.Arrow
-	local Enabled = Visible and Alpha > 0.01 and not OnScreen and Settings.Enabled == true and VeloESP.Settings.Arrows == true
+function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
+	local Beacon = self.UI.EdgeBeacon
+	local Settings = self.CurrentSettings.EdgeBeacon
+	local GlobalEnabled = VeloESP.Settings.EdgeBeacons == true or VeloESP.Settings.Arrows == true
+	local Enabled = Visible and Alpha > 0.01 and not OnScreen and Settings.Enabled == true and GlobalEnabled
 
-	if Arrow == nil then
+	if Beacon == nil or Beacon.Root == nil then
 		return
 	end
 
-	Arrow.Visible = Enabled
+	Beacon.Root.Visible = Enabled
 
 	if not Enabled then
 		return
@@ -1161,19 +1247,119 @@ function ESP:_UpdateArrow(Visible, OnScreen, ScreenPosition, Alpha)
 		Direction = Direction.Unit
 	end
 
-	local Radius = math.min(Viewport.X, Viewport.Y) * ((tonumber(Settings.CenterOffset) or 420) / 1000)
-	local Position = Center + Direction * Radius
-	local Size = tonumber(Settings.Size) or 36
+	local Margin = Settings.Margin + math.max(42, Settings.Length)
+	local BoundsX = math.max(8, (Viewport.X / 2) - Margin)
+	local BoundsY = math.max(8, (Viewport.Y / 2) - Margin)
+	local ScaleX = math.huge
+	local ScaleY = math.huge
 
-	Arrow.Size = UDim2.fromOffset(Size, Size)
-	Arrow.Position = UDim2.fromOffset(Position.X, Position.Y)
-	Arrow.Rotation = math.deg(math.atan2(Direction.Y, Direction.X))
-	Arrow.TextColor3 = self:_GetColor(Settings.Color)
-	Arrow.TextTransparency = ApplyAlphaTransparency(0, Alpha)
-	Arrow.TextStrokeTransparency = ApplyAlphaTransparency(0, Alpha)
+	if math.abs(Direction.X) > 0.001 then
+		ScaleX = BoundsX / math.abs(Direction.X)
+	end
+
+	if math.abs(Direction.Y) > 0.001 then
+		ScaleY = BoundsY / math.abs(Direction.Y)
+	end
+
+	local Position = Center + Direction * math.min(ScaleX, ScaleY)
+	local VerticalEdge = ScaleX < ScaleY
+	local Color = self:_GetColor(Settings.Color)
+	local DotSize = Settings.DotSize
+	local Thickness = Settings.Thickness
+	local Length = Settings.Length
+	local Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
+
+	Beacon.Root.Position = UDim2.fromOffset(Position.X, Position.Y)
+	Beacon.Stem.Size = UDim2.fromOffset(Length, Thickness)
+	if VerticalEdge then
+		Beacon.Stem.Rotation = 90
+	else
+		Beacon.Stem.Rotation = 0
+	end
+	Beacon.Stem.BackgroundColor3 = Color
+	Beacon.Stem.BackgroundTransparency = math.clamp(Transparency + 0.18, 0, 1)
+
+	Beacon.Dot.Size = UDim2.fromOffset(DotSize, DotSize)
+	Beacon.Dot.BackgroundColor3 = Color
+	Beacon.Dot.BackgroundTransparency = Transparency
+
+	if Settings.Pulse == true and Settings.PulseSpeed > 0 then
+		local Phase = ((os.clock() * Settings.PulseSpeed) + (self._Seed or 0)) % 1
+		local PulseSize = DotSize + (DotSize * 2 * Phase)
+
+		Beacon.Pulse.Visible = true
+		Beacon.Pulse.Size = UDim2.fromOffset(PulseSize, PulseSize)
+		Beacon.Pulse.BackgroundColor3 = Color
+		Beacon.Pulse.BackgroundTransparency = math.clamp(
+			ApplyAlphaTransparency(Settings.PulseTransparency, Alpha) + (Phase * 0.16),
+			0,
+			1
+		)
+	else
+		Beacon.Pulse.Visible = false
+	end
+
+	Beacon.Label.Visible = Settings.Label == true
+	Beacon.Label.TextColor3 = Color
+	Beacon.Label.TextSize = Settings.TextSize
+	Beacon.Label.TextTransparency = ApplyAlphaTransparency(0, Alpha)
+	Beacon.Label.TextStrokeTransparency = ApplyAlphaTransparency(0.45, Alpha)
+
+	if Settings.Label == true then
+		local Name = tostring(self.CurrentSettings.Name or self.Target.Name)
+
+		if Settings.Distance == true then
+			Beacon.Label.Text = string.format("%s  %dst", Name, math.floor(Distance + 0.5))
+		else
+			Beacon.Label.Text = Name
+		end
+	end
 end
 
-function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha)
+function ESP:_GetSkeletonCache()
+	local Model = self.CurrentSettings.Model
+
+	if not (typeof(Model) == "Instance" and Model:IsA("Model")) then
+		return nil
+	end
+
+	local Humanoid = Model:FindFirstChildWhichIsA("Humanoid")
+	local RigType = "R6"
+
+	if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then
+		RigType = "R15"
+	end
+
+	local Cache = self._SkeletonCache
+
+	if Cache and Cache.Model == Model and Cache.RigType == RigType then
+		return Cache
+	end
+
+	local Segments = SkeletonSegments[RigType]
+	local Parts = {}
+
+	for Index, Segment in ipairs(Segments) do
+		local First = Model:FindFirstChild(Segment[1])
+		local Second = Model:FindFirstChild(Segment[2])
+
+		if First and Second and First:IsA("BasePart") and Second:IsA("BasePart") then
+			Parts[Index] = { First, Second }
+		end
+	end
+
+	Cache = {
+		Model = Model,
+		RigType = RigType,
+		Segments = Segments,
+		Parts = Parts,
+	}
+	self._SkeletonCache = Cache
+
+	return Cache
+end
+
+function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 	local Settings = self.CurrentSettings
 	local SkeletonSettings = Settings.Skeleton
 	local Lines = self.UI.Skeleton
@@ -1198,32 +1384,38 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha)
 		return
 	end
 
+	self._SkeletonElapsed = (self._SkeletonElapsed or 0) + (DeltaTime or 1 / 60)
+
+	if self._SkeletonVisible == true and SkeletonSettings.UpdateRate > 0 and self._SkeletonElapsed < SkeletonSettings.UpdateRate then
+		return
+	end
+
+	self._SkeletonElapsed = 0
 	self._SkeletonVisible = true
 
-	local Humanoid = Settings.Model:FindFirstChildWhichIsA("Humanoid")
-	local RigType = "R6"
+	local Cache = self:_GetSkeletonCache()
 
-	if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then
-		RigType = "R15"
+	if Cache == nil then
+		return
 	end
-	local Segments = SkeletonSegments[RigType]
 
 	for Index, Line in ipairs(Lines) do
-		local Segment = Segments[Index]
+		local Segment = Cache.Segments[Index]
 
 		if Segment == nil then
 			Line.Visible = false
 			continue
 		end
 
-		local First = Settings.Model:FindFirstChild(Segment[1])
-		local Second = Settings.Model:FindFirstChild(Segment[2])
+		local Parts = Cache.Parts[Index]
 
-		if not (First and Second and First:IsA("BasePart") and Second:IsA("BasePart")) then
+		if Parts == nil or Parts[1].Parent == nil or Parts[2].Parent == nil then
 			Line.Visible = false
 			continue
 		end
 
+		local First = Parts[1]
+		local Second = Parts[2]
 		local PointA = WorldToViewport(First.Position)
 		local PointB = WorldToViewport(Second.Position)
 		local ShowLine = PointA.Z > 0 and PointB.Z > 0
@@ -1338,8 +1530,8 @@ function ESP:_Update(DeltaTime)
 	self:_UpdateBox2D(Visible, OnScreen, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
 	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners or {})
 	self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
-	self:_UpdateArrow(Visible, OnScreen, ScreenPosition, Alpha)
-	self:_UpdateSkeleton(Visible, OnScreen, Alpha)
+	self:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
+	self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 	if Settings.AfterUpdate then
 		SafeCall(Settings.AfterUpdate, self)
@@ -1352,6 +1544,7 @@ function ESP:Set(Options)
 	Merge(self.CurrentSettings, Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
+	self._SkeletonCache = nil
 
 	return self
 end
@@ -1389,7 +1582,7 @@ function ESP:SetEveryColor(Color, IncludeComponents)
 
 	if IncludeComponents == true then
 		self.CurrentSettings.Tracer.Color = Color
-		self.CurrentSettings.Arrow.Color = Color
+		self.CurrentSettings.EdgeBeacon.Color = Color
 		self.CurrentSettings.Box2D.Color = Color
 		self.CurrentSettings.Box3D.Color = Color
 		self.CurrentSettings.Skeleton.Color = Color
@@ -1473,6 +1666,7 @@ function VeloESP.new(Target, Options)
 		Destroyed = false,
 		Deleted = false,
 		_Alpha = StartAlpha,
+		_Seed = math.random(),
 		_UpdateElapsed = 0,
 		OriginalSettings = DeepCopy(Settings),
 		CurrentSettings = Settings,

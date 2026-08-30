@@ -71,10 +71,10 @@ local State = {
 	Billboards = true,
 	Distance = true,
 	Tracers = true,
-	Arrows = true,
+	EdgeBeacons = true,
 	Boxes2D = true,
 	Boxes3D = true,
-	Skeleton = true,
+	Skeleton = false,
 	Rainbow = false,
 	Fade = true,
 	UltraPerformance = true,
@@ -99,7 +99,8 @@ local function ApplyGlobalSettings()
 		Billboards = State.Billboards,
 		Distance = State.Distance,
 		Tracers = State.Tracers,
-		Arrows = State.Arrows,
+		EdgeBeacons = State.EdgeBeacons,
+		Arrows = false,
 		Boxes2D = State.Boxes2D,
 		Boxes3D = State.Boxes3D,
 		Skeleton = State.Skeleton,
@@ -135,10 +136,13 @@ local PlayerESP = VeloESP.WatchPlayers({
 		From = "Bottom",
 		Thickness = 2,
 	},
-	Arrow = {
+	EdgeBeacon = {
 		Enabled = true,
-		CenterOffset = 430,
-		Size = 34,
+		Margin = 26,
+		Length = 46,
+		DotSize = 11,
+		Pulse = true,
+		Label = true,
 	},
 	Box2D = {
 		Enabled = true,
@@ -150,8 +154,9 @@ local PlayerESP = VeloESP.WatchPlayers({
 		Thickness = 1,
 	},
 	Skeleton = {
-		Enabled = true,
+		Enabled = State.Skeleton,
 		Thickness = 1,
+		UpdateRate = 0.06,
 	},
 	Fade = {
 		Enabled = State.Fade,
@@ -208,10 +213,13 @@ local WorldESP = VeloESP.watch(workspace, {
 		From = "Mouse",
 		Thickness = 2,
 	},
-	Arrow = {
+	EdgeBeacon = {
 		Enabled = true,
-		CenterOffset = 420,
-		Size = 32,
+		Margin = 26,
+		Length = 42,
+		DotSize = 10,
+		Pulse = true,
+		Label = true,
 	},
 	Box2D = {
 		Enabled = true,
@@ -285,11 +293,14 @@ local function CreateTestPart(Name, Offset, Color, ESPType)
 			From = "Bottom",
 			Thickness = 2,
 		},
-		Arrow = {
+		EdgeBeacon = {
 			Enabled = true,
 			Color = Color,
-			CenterOffset = 440,
-			Size = 36,
+			Margin = 28,
+			Length = 48,
+			DotSize = 12,
+			Pulse = true,
+			Label = true,
 		},
 		Box2D = {
 			Enabled = true,
@@ -439,11 +450,11 @@ ComponentGroup:AddToggle("VeloESPTracers", {
 	end,
 })
 
-ComponentGroup:AddToggle("VeloESPArrows", {
-	Text = "Off-screen Arrows",
+ComponentGroup:AddToggle("VeloESPEdgeBeacons", {
+	Text = "Edge Beacons",
 	Default = true,
 	Callback = function(Value)
-		State.Arrows = Value
+		State.EdgeBeacons = Value
 		ApplyGlobalSettings()
 	end,
 })
@@ -468,7 +479,7 @@ ComponentGroup:AddToggle("VeloESP3DBoxes", {
 
 ComponentGroup:AddToggle("VeloESPSkeleton", {
 	Text = "Skeleton",
-	Default = true,
+	Default = false,
 	Callback = function(Value)
 		State.Skeleton = Value
 		ApplyGlobalSettings()
