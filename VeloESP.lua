@@ -1,13 +1,3 @@
---!nocheck
---!nolint UnknownGlobal
-
---[[
-	VeloESP
-	Advanced Roblox ESP library with billboard text, highlights, adornments,
-	2D/3D boxes, tracers, off-screen arrows, skeletons, dynamic watchers,
-	and an example-compatible Add API.
-]]
-
 local getgenv = getgenv or function()
 	return shared
 end
@@ -109,19 +99,10 @@ end
 local function Resolve(Value, Object, Fallback)
 	if typeof(Value) == "function" then
 		local Success, Result = pcall(Value, Object)
-
-		if Success and Result ~= nil then
-			return Result
-		end
-
-		return Fallback
+		return if Success and Result ~= nil then Result else Fallback
 	end
 
-	if Value ~= nil then
-		return Value
-	end
-
-	return Fallback
+	return if Value ~= nil then Value else Fallback
 end
 
 local function ClampNumber(Value, Min, Max, Fallback)
@@ -182,12 +163,7 @@ local function GetCFrame(Target)
 	end
 
 	local Part = GetPart(Target)
-
-	if Part then
-		return Part.CFrame
-	end
-
-	return nil
+	return if Part then Part.CFrame else nil
 end
 
 local function GetBounds(Target)
@@ -214,11 +190,7 @@ local function GetBounds(Target)
 	end
 
 	local Part = GetPart(Target)
-	if Part then
-		return Part.CFrame, Part.Size
-	end
-
-	return nil, nil
+	return if Part then Part.CFrame, Part.Size else nil, nil
 end
 
 local function WorldToViewport(Position)
@@ -248,12 +220,7 @@ local function GetDistance(Target, From)
 	end
 
 	local ActiveCamera = GetCamera()
-
-	if ActiveCamera then
-		return (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
-	end
-
-	return math.huge
+	return if ActiveCamera then (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude else math.huge
 end
 
 local function UpdateLine(Frame, PointA, PointB, Thickness)
@@ -345,11 +312,7 @@ do
 	end)
 
 	CoreGuiAllowed = Success == true
-	if CoreGuiAllowed then
-		GuiParent = CoreGui
-	else
-		GuiParent = LocalPlayer:WaitForChild("PlayerGui")
-	end
+	GuiParent = if CoreGuiAllowed then CoreGui else LocalPlayer:WaitForChild("PlayerGui")
 
 	Destroy(TestGui)
 end
@@ -560,12 +523,6 @@ local function NormalizeOptions(Target, Options)
 	Final.Box3D = BuildComponentSettings(Final.Box3D, Defaults.Box3D)
 	Final.Skeleton = BuildComponentSettings(Final.Skeleton, Defaults.Skeleton)
 
-	for _, Component in ipairs({ Final.Tracer, Final.Arrow, Final.Box2D, Final.Box3D, Final.Skeleton }) do
-		if Component.Color == nil or Component.Color == Color3.new(1, 1, 1) then
-			Component.Color = Final.Color
-		end
-	end
-
 	if typeof(Final.Box) == "boolean" then
 		Final.Box2D.Enabled = Final.Box
 	end
@@ -575,18 +532,10 @@ local function NormalizeOptions(Target, Options)
 	end
 
 	local TracerFrom = string.lower(tostring(Final.Tracer.From or "Bottom"))
-	if AllowedTracerFrom[TracerFrom] then
-		Final.Tracer.From = TracerFrom
-	else
-		Final.Tracer.From = "bottom"
-	end
+	Final.Tracer.From = if AllowedTracerFrom[TracerFrom] then TracerFrom else "bottom"
 
 	local Type = string.lower(tostring(Final.ESPType or "Highlight"))
-	if AllowedESPType[Type] then
-		Final.ESPType = Type
-	else
-		Final.ESPType = "highlight"
-	end
+	Final.ESPType = if AllowedESPType[Type] then Type else "highlight"
 
 	Final.MaxDistance = tonumber(Final.MaxDistance) or Defaults.MaxDistance
 	Final.Thickness = tonumber(Final.Thickness) or Defaults.Thickness
@@ -939,12 +888,7 @@ function ESP:_UpdateBox2D(Visible, OnScreen)
 	Box.Position = UDim2.fromOffset(MinX, MinY)
 	Box.Size = UDim2.fromOffset(math.max(1, MaxX - MinX), math.max(1, MaxY - MinY))
 	self.UI.BoxFill.BackgroundColor3 = Color
-
-	if BoxSettings.Filled then
-		self.UI.BoxFill.BackgroundTransparency = ClampNumber(BoxSettings.FillTransparency, 0, 1, 0.75)
-	else
-		self.UI.BoxFill.BackgroundTransparency = 1
-	end
+	self.UI.BoxFill.BackgroundTransparency = if BoxSettings.Filled then ClampNumber(BoxSettings.FillTransparency, 0, 1, 0.75) else 1
 
 	local Lines = self.UI.BoxLines
 	Lines.Top.Position = UDim2.fromOffset(0, 0)
@@ -1104,11 +1048,7 @@ function ESP:_UpdateSkeleton(Visible, OnScreen)
 	end
 
 	local Humanoid = Settings.Model:FindFirstChildWhichIsA("Humanoid")
-	local RigType = "R6"
-
-	if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then
-		RigType = "R15"
-	end
+	local RigType = if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then "R15" else "R6"
 	local Segments = SkeletonSegments[RigType]
 
 	for Index, Line in ipairs(Lines) do
@@ -1294,7 +1234,7 @@ function VeloESP.new(Target, Options)
 
 	local Settings = NormalizeOptions(Target, Options)
 	local Object = setmetatable({
-		Index = Target.Name .. "_" .. tostring(math.random(100000, 999999)),
+		Index = tostring(Target:GetDebugId()) .. "_" .. tostring(math.random(100000, 999999)),
 		Target = Target,
 		Hidden = false,
 		Destroyed = false,
@@ -1312,9 +1252,7 @@ function VeloESP.new(Target, Options)
 	return Object
 end
 
-function VeloESP.Add(SelfOrSettings, MaybeSettings)
-	local Settings = MaybeSettings or SelfOrSettings
-
+function VeloESP:Add(Settings)
 	assert(typeof(Settings) == "table", "Argument #1 must be a table.")
 	assert(typeof(Settings.Model) == "Instance", "Settings.Model must be an Instance.")
 
