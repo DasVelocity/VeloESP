@@ -99,10 +99,19 @@ end
 local function Resolve(Value, Object, Fallback)
 	if typeof(Value) == "function" then
 		local Success, Result = pcall(Value, Object)
-		return if Success and Result ~= nil then Result else Fallback
+
+		if Success and Result ~= nil then
+			return Result
+		end
+
+		return Fallback
 	end
 
-	return if Value ~= nil then Value else Fallback
+	if Value ~= nil then
+		return Value
+	end
+
+	return Fallback
 end
 
 local function ClampNumber(Value, Min, Max, Fallback)
@@ -163,7 +172,12 @@ local function GetCFrame(Target)
 	end
 
 	local Part = GetPart(Target)
-	return if Part then Part.CFrame else nil
+
+	if Part then
+		return Part.CFrame
+	end
+
+	return nil
 end
 
 local function GetBounds(Target)
@@ -190,7 +204,12 @@ local function GetBounds(Target)
 	end
 
 	local Part = GetPart(Target)
-	return if Part then Part.CFrame, Part.Size else nil, nil
+
+	if Part then
+		return Part.CFrame, Part.Size
+	end
+
+	return nil, nil
 end
 
 local function WorldToViewport(Position)
@@ -220,7 +239,12 @@ local function GetDistance(Target, From)
 	end
 
 	local ActiveCamera = GetCamera()
-	return if ActiveCamera then (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude else math.huge
+
+	if ActiveCamera then
+		return (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+	end
+
+	return math.huge
 end
 
 local function UpdateLine(Frame, PointA, PointB, Thickness)
@@ -312,7 +336,11 @@ do
 	end)
 
 	CoreGuiAllowed = Success == true
-	GuiParent = if CoreGuiAllowed then CoreGui else LocalPlayer:WaitForChild("PlayerGui")
+	if CoreGuiAllowed then
+		GuiParent = CoreGui
+	else
+		GuiParent = LocalPlayer:WaitForChild("PlayerGui")
+	end
 
 	Destroy(TestGui)
 end
@@ -532,10 +560,18 @@ local function NormalizeOptions(Target, Options)
 	end
 
 	local TracerFrom = string.lower(tostring(Final.Tracer.From or "Bottom"))
-	Final.Tracer.From = if AllowedTracerFrom[TracerFrom] then TracerFrom else "bottom"
+	if AllowedTracerFrom[TracerFrom] then
+		Final.Tracer.From = TracerFrom
+	else
+		Final.Tracer.From = "bottom"
+	end
 
 	local Type = string.lower(tostring(Final.ESPType or "Highlight"))
-	Final.ESPType = if AllowedESPType[Type] then Type else "highlight"
+	if AllowedESPType[Type] then
+		Final.ESPType = Type
+	else
+		Final.ESPType = "highlight"
+	end
 
 	Final.MaxDistance = tonumber(Final.MaxDistance) or Defaults.MaxDistance
 	Final.Thickness = tonumber(Final.Thickness) or Defaults.Thickness
@@ -888,7 +924,12 @@ function ESP:_UpdateBox2D(Visible, OnScreen)
 	Box.Position = UDim2.fromOffset(MinX, MinY)
 	Box.Size = UDim2.fromOffset(math.max(1, MaxX - MinX), math.max(1, MaxY - MinY))
 	self.UI.BoxFill.BackgroundColor3 = Color
-	self.UI.BoxFill.BackgroundTransparency = if BoxSettings.Filled then ClampNumber(BoxSettings.FillTransparency, 0, 1, 0.75) else 1
+
+	if BoxSettings.Filled then
+		self.UI.BoxFill.BackgroundTransparency = ClampNumber(BoxSettings.FillTransparency, 0, 1, 0.75)
+	else
+		self.UI.BoxFill.BackgroundTransparency = 1
+	end
 
 	local Lines = self.UI.BoxLines
 	Lines.Top.Position = UDim2.fromOffset(0, 0)
@@ -1048,7 +1089,11 @@ function ESP:_UpdateSkeleton(Visible, OnScreen)
 	end
 
 	local Humanoid = Settings.Model:FindFirstChildWhichIsA("Humanoid")
-	local RigType = if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then "R15" else "R6"
+	local RigType = "R6"
+
+	if Humanoid and Humanoid.RigType == Enum.HumanoidRigType.R15 then
+		RigType = "R15"
+	end
 	local Segments = SkeletonSegments[RigType]
 
 	for Index, Line in ipairs(Lines) do
@@ -1234,7 +1279,7 @@ function VeloESP.new(Target, Options)
 
 	local Settings = NormalizeOptions(Target, Options)
 	local Object = setmetatable({
-		Index = tostring(Target:GetDebugId()) .. "_" .. tostring(math.random(100000, 999999)),
+		Index = Target.Name .. "_" .. tostring(math.random(100000, 999999)),
 		Target = Target,
 		Hidden = false,
 		Destroyed = false,
@@ -1252,7 +1297,9 @@ function VeloESP.new(Target, Options)
 	return Object
 end
 
-function VeloESP:Add(Settings)
+function VeloESP.Add(SelfOrSettings, MaybeSettings)
+	local Settings = MaybeSettings or SelfOrSettings
+
 	assert(typeof(Settings) == "table", "Argument #1 must be a table.")
 	assert(typeof(Settings.Model) == "Instance", "Settings.Model must be an Instance.")
 
@@ -1685,4 +1732,3 @@ end))
 
 Environment.VeloESP = VeloESP
 return VeloESP
---yp
