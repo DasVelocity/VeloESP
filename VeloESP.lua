@@ -8,7 +8,7 @@
 	 ╚████╔╝ ███████╗███████╗╚██████╔╝███████╗███████║██║
 	  ╚═══╝  ╚══════╝╚══════╝ ╚═════╝ ╚══════╝╚══════╝╚═╝
 
-							  v1.0.0
+							  v4.0.0
 
 							VeloESP
 
@@ -273,13 +273,333 @@ local WorldRoot = New("Folder", {
 
 -- // Library // --
 local VeloESP = {
-	Version = "3.0.0",
+	Version = "4.0.0",
 	_Destroyed = false,
 
 	-- // ESP // --
 	_Objects = {},
 
-	-- // Connections // --
+	
+-- // Watchers // --
+local Watcher = {}
+Watcher.__index = Watcher
+
+local function Resolve(Value, Object, Fallback)
+	if typeof(Value) ~= "function" then
+		if Value == nil then
+			return Fallback
+		end
+
+		return Value
+	end
+
+	local Success, Result = pcall(Value, Object)
+
+	if Success then
+		return Result
+	end
+
+	return Fallback
+end
+
+local function MatchesRule(Rule, Object)
+	local Match = Rule.Match
+
+	if typeof(Match) == "string" then
+		return Object.Name == Match
+	end
+
+	if typeof(Match) == "table" then
+		if Match[Object.Name] ~= nil then
+			return Match[Object.Name] == true
+		end
+
+		return table.find(Match, Object.Name) ~= nil
+	end
+
+	if typeof(Match) == "function" then
+		local Success, Result = pcall(Match, Object)
+		return Success and Result == true
+	end
+
+	return false
+end
+
+function Watcher:_BuildOptions(Object)
+	local Rule = self.Rule
+
+	return {
+		Name = Resolve(Rule.Name, Object, Object.Name),
+		Color = Resolve(Rule.Color, Object, Color3.new(1, 1, 1)),
+
+		MaxDistance = Resolve(Rule.MaxDistance, Object, 5000),
+
+		Text = Resolve(Rule.Text, Object, true),
+		Distance = Resolve(Rule.Distance, Object, true),
+
+		Highlight = Resolve(Rule.Highlight, Object, true),
+		Box = Resolve(Rule.Box, Object, false),
+		Tracer = Resolve(Rule.Tracer, Object, false),
+		Arrow = Resolve(Rule.Arrow, Object, false),
+		Skeleton = Resolve(Rule.Skeleton, Object, false),
+
+		TracerFrom = Resolve(Rule.TracerFrom, Object, "Bottom"),
+
+		Offset = Resolve(Rule.Offset, Object, Vector3.new(0, 2.5, 0)),
+
+		FillTransparency = Resolve(Rule.FillTransparency, Object, 0.75),
+		OutlineTransparency = Resolve(Rule.OutlineTransparency, Object, 0),
+
+		Thickness = Resolve(Rule.Thickness, Object, 2)
+	}
+end
+
+function Watcher:_ShouldShow(Object)
+	if self.Destroyed or not self.Enabled then
+		return false
+	end
+
+	if not Object or not Object.Parent then
+		return false
+	end
+
+	if not MatchesRule(self.Rule, Object) then
+		return false
+	end
+
+	local Visible = self.Rule.Visible
+
+	if Visible == nil then
+		return true
+	end
+
+	return Resolve(Visible, Object, false) == true
+end
+
+function Watcher:_UpdateObject(Object)
+	if self.Destroyed then
+		return
+	end
+
+	if not Object or not Object.Parent then
+		self.Objects[Object] = nil
+
+		local Handle = self.Handles[Object]
+		if Handle then
+			Handle:Destroy()
+			self.Handles[Object] = nil
+		end
+
+		return
+	end
+
+	if not MatchesRule(self.Rule, Object) then
+		return
+	end
+
+	self.Objects[Object] = true
+
+	local Handle = self.Handles[Object]
+
+	if not self:_ShouldShow(Object) then
+		if Handle then
+			Handle:Destroy()
+			self.Handles[Object] = nil
+		end
+
+		return
+	end
+
+	local Options = self:_BuildOptions(Object)
+
+	if Handle and not Handle.Destroyed then
+		Handle:Set(Options)
+		return
+	end
+
+	Handle = VeloESP.new(Object, Options)
+	self.Handles[Object] = Handle
+end
+
+function Watcher:_Scan()
+	if self.Destroyed then
+		return
+	end
+
+	if MatchesRule(self.Rule, self.Root) then
+		self:_UpdateObject(self.Root)
+	end
+
+	for _, Object in self.Root:GetDescendants() do
+		if MatchesRule(self.Rule, Object) then
+			self:_UpdateObject(Object)
+		end
+	end
+end
+
+function Watcher:_Refresh()
+	if self.Destroyed then
+		return
+	end
+
+	local Objects = {}
+
+	for Object in self.Objects do
+		table.insert(Objects, Object)
+	end
+
+	for _, Object in Objects do
+		self:_UpdateObject(Object)
+	end
+end
+
+function Watcher:SetEnabled(Value)
+	self.Enabled = Value == true
+
+	if self.Enabled then
+		self:_Scan()
+		self:_Refresh()
+	else
+		for Object, Handle in self.Handles do
+			if Handle and not Handle.Destroyed then
+				Handle:Destroy()
+			end
+
+			self.Handles[Object] = nil
+		end
+	end
+
+	return self
+end
+
+function Watcher:Enable()
+	return self:SetEnabled(true)
+end
+
+function Watcher:Disable()
+	return self:SetEnabled(false)
+end
+
+function Watcher:Toggle()
+	return self:SetEnabled(not self.Enabled)
+end
+
+function Watcher:Set(Options)
+	assert(typeof(Options) == "table", "Argument #1 must be a table.")
+
+	for Key, Value in Options do
+		self.Rule[Key] = Value
+	end
+
+	self:_Refresh()
+	return self
+end
+
+function Watcher:Refresh()
+	self:_Scan()
+	self:_Refresh()
+
+	return self
+end
+
+function Watcher:Destroy()
+	if self.Destroyed then
+		return
+	end
+
+	self.Destroyed = true
+
+	for _, Connection in self.Connections do
+		if Connection and Connection.Connected then
+			Connection:Disconnect()
+		end
+	end
+
+	for Object, Handle in self.Handles do
+		if Handle and not Handle.Destroyed then
+			Handle:Destroy()
+		end
+
+		self.Handles[Object] = nil
+	end
+
+	table.clear(self.Connections)
+	table.clear(self.Objects)
+end
+
+function VeloESP.watch(Root, Rule)
+	assert(not VeloESP._Destroyed, "VeloESP is destroyed, please reload it.")
+	assert(typeof(Root) == "Instance", "Argument #1 must be an Instance.")
+	assert(typeof(Rule) == "table", "Argument #2 must be a table.")
+	assert(
+		typeof(Rule.Match) == "string"
+			or typeof(Rule.Match) == "table"
+			or typeof(Rule.Match) == "function",
+		"Rule.Match must be a string, table, or function."
+	)
+
+	local Object = setmetatable({
+		Root = Root,
+		Rule = CloneTable(Rule),
+
+		Enabled = Rule.Enabled ~= false,
+		Destroyed = false,
+
+		Objects = setmetatable({}, { __mode = "k" }),
+		Handles = setmetatable({}, { __mode = "k" }),
+		Connections = {},
+
+		Elapsed = 0,
+		Interval = tonumber(Rule.Interval) or 0.15
+	}, Watcher)
+
+	-- // New descendants // --
+	table.insert(Object.Connections, Root.DescendantAdded:Connect(function(Descendant)
+		if MatchesRule(Object.Rule, Descendant) then
+			task.defer(function()
+				if not Object.Destroyed and Descendant.Parent then
+					Object:_UpdateObject(Descendant)
+				end
+			end)
+		end
+	end))
+
+	-- // Removed descendants // --
+	table.insert(Object.Connections, Root.DescendantRemoving:Connect(function(Descendant)
+		if Object.Objects[Descendant] then
+			Object.Objects[Descendant] = nil
+
+			local Handle = Object.Handles[Descendant]
+			if Handle then
+				Handle:Destroy()
+				Object.Handles[Descendant] = nil
+			end
+		end
+	end))
+
+	-- // Live refresh // --
+	table.insert(Object.Connections, RunService.Heartbeat:Connect(function(DeltaTime)
+		if Object.Destroyed or not Object.Enabled then
+			return
+		end
+
+		Object.Elapsed += DeltaTime
+
+		if Object.Elapsed < Object.Interval then
+			return
+		end
+
+		Object.Elapsed = 0
+		Object:_Refresh()
+	end))
+
+	Object:_Scan()
+	table.insert(VeloESP._Watchers, Object)
+
+	return Object
+end
+
+-- // Connections // --
 	_Connections = {},
 
 	-- // Global Config // --
@@ -965,6 +1285,14 @@ function VeloESP.Destroy()
 	if VeloESP._Destroyed then
 		return
 	end
+
+	-- // Destroy watchers // --
+	for _, Object in VeloESP._Watchers do
+		if Object and not Object.Destroyed then
+			Object:Destroy()
+		end
+	end
+	table.clear(VeloESP._Watchers)
 
 	-- // Destroy library // --
 	VeloESP.Clear()
