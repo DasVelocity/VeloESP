@@ -124,6 +124,23 @@ local function ClampNumber(Value, Min, Max, Fallback)
 	return math.clamp(Value, Min, Max)
 end
 
+local function Approach(Current, Target, Step)
+	if Current < Target then
+		return math.min(Current + Step, Target)
+	elseif Current > Target then
+		return math.max(Current - Step, Target)
+	end
+
+	return Target
+end
+
+local function ApplyAlphaTransparency(BaseTransparency, Alpha)
+	BaseTransparency = ClampNumber(BaseTransparency, 0, 1, 0)
+	Alpha = ClampNumber(Alpha, 0, 1, 1)
+
+	return 1 - ((1 - BaseTransparency) * Alpha)
+end
+
 local function GetCamera()
 	if Camera == nil or Camera.Parent == nil then
 		Camera = workspace.CurrentCamera
@@ -390,6 +407,8 @@ local Defaults = {
 	Font = nil,
 	Text = true,
 	Distance = true,
+	TextTransparency = 0,
+	TextStrokeTransparency = 0,
 	Billboard = true,
 	Highlight = true,
 	ESPType = "Highlight",
@@ -432,6 +451,17 @@ local Defaults = {
 		Color = Color3.new(1, 1, 1),
 		Thickness = 1,
 		Transparency = 0,
+	},
+	Fade = {
+		Enabled = false,
+		Speed = 14,
+		InSpeed = nil,
+		OutSpeed = nil,
+		Distance = false,
+		Near = 0,
+		Far = nil,
+		Min = 0,
+		Max = 1,
 	},
 	BeforeUpdate = nil,
 	AfterUpdate = nil,
@@ -492,6 +522,7 @@ local VeloESP = {
 	Version = "5.0.0",
 	_Destroyed = false,
 	_Objects = setmetatable({}, { __mode = "k" }),
+	_ObjectList = {},
 	_Watchers = {},
 	_Connections = {},
 	Roots = {
@@ -518,6 +549,11 @@ local VeloESP = {
 		Skeleton = true,
 		Font = Enum.Font.RobotoMono,
 		TextSize = 14,
+		UpdateRate = 0,
+		NearUpdateRate = 0,
+		FarUpdateRate = 0.12,
+		FarDistance = 650,
+		MaxPerFrame = math.huge,
 	},
 }
 
@@ -550,6 +586,7 @@ local function NormalizeOptions(Target, Options)
 	Final.Box2D = BuildComponentSettings(Final.Box2D or Final.Box, Defaults.Box2D)
 	Final.Box3D = BuildComponentSettings(Final.Box3D, Defaults.Box3D)
 	Final.Skeleton = BuildComponentSettings(Final.Skeleton, Defaults.Skeleton)
+	Final.Fade = BuildComponentSettings(Final.Fade, Defaults.Fade)
 
 	if typeof(Final.Box) == "boolean" then
 		Final.Box2D.Enabled = Final.Box
@@ -578,6 +615,15 @@ local function NormalizeOptions(Target, Options)
 	Final.Transparency = ClampNumber(Final.Transparency, 0, 1, Defaults.Transparency)
 	Final.FillTransparency = ClampNumber(Final.FillTransparency, 0, 1, Defaults.FillTransparency)
 	Final.OutlineTransparency = ClampNumber(Final.OutlineTransparency, 0, 1, Defaults.OutlineTransparency)
+	Final.TextTransparency = ClampNumber(Final.TextTransparency, 0, 1, Defaults.TextTransparency)
+	Final.TextStrokeTransparency = ClampNumber(Final.TextStrokeTransparency, 0, 1, Defaults.TextStrokeTransparency)
+	Final.Fade.Speed = math.max(0, tonumber(Final.Fade.Speed) or Defaults.Fade.Speed)
+	Final.Fade.InSpeed = math.max(0, tonumber(Final.Fade.InSpeed) or Final.Fade.Speed)
+	Final.Fade.OutSpeed = math.max(0, tonumber(Final.Fade.OutSpeed) or Final.Fade.Speed)
+	Final.Fade.Near = math.max(0, tonumber(Final.Fade.Near) or Defaults.Fade.Near)
+	Final.Fade.Far = tonumber(Final.Fade.Far) or Final.MaxDistance
+	Final.Fade.Min = ClampNumber(Final.Fade.Min, 0, 1, Defaults.Fade.Min)
+	Final.Fade.Max = ClampNumber(Final.Fade.Max, 0, 1, Defaults.Fade.Max)
 
 	return Final
 end
@@ -592,6 +638,47 @@ function ESP:_GetColor(Base)
 	end
 
 	return Base or self.CurrentSettings.Color
+end
+
+function ESP:_GetFadeTarget(Visible, Distance)
+	local Fade = self.CurrentSettings.Fade
+
+	if Visible ~= true then
+		return 0
+	end
+
+	if Fade.Enabled ~= true then
+		return 1
+	end
+
+	if Fade.Distance == true then
+		local Near = Fade.Near
+		local Far = math.max(Near + 1, Fade.Far or self.CurrentSettings.MaxDistance)
+		local Percent = 1 - math.clamp((Distance - Near) / (Far - Near), 0, 1)
+
+		return math.clamp(Fade.Min + ((Fade.Max - Fade.Min) * Percent), 0, 1)
+	end
+
+	return Fade.Max
+end
+
+function ESP:_StepFade(TargetAlpha, DeltaTime)
+	local Fade = self.CurrentSettings.Fade
+
+	if Fade.Enabled ~= true then
+		self._Alpha = TargetAlpha
+		return TargetAlpha
+	end
+
+	local Speed = Fade.OutSpeed
+
+	if TargetAlpha > self._Alpha then
+		Speed = Fade.InSpeed
+	end
+
+	self._Alpha = Approach(self._Alpha, TargetAlpha, (DeltaTime or 1 / 60) * Speed)
+
+	return self._Alpha
 end
 
 function ESP:_CreateBillboard()
@@ -820,11 +907,11 @@ function ESP:_HideAll()
 	end
 end
 
-function ESP:_UpdateBillboard(Visible, OnScreen, Distance)
+function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
 	local Settings = self.CurrentSettings
-	local Enabled = Visible and OnScreen and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
+	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
 
 	if Billboard == nil or Label == nil then
 		return
@@ -847,14 +934,16 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance)
 	Billboard.StudsOffset = Settings.StudsOffset
 	Label.Text = Text
 	Label.TextColor3 = self:_GetColor(Settings.Color)
+	Label.TextTransparency = ApplyAlphaTransparency(Settings.TextTransparency, Alpha)
+	Label.TextStrokeTransparency = ApplyAlphaTransparency(Settings.TextStrokeTransparency, Alpha)
 	Label.Font = Settings.Font or VeloESP.Settings.Font
 	Label.TextSize = Settings.TextSize or VeloESP.Settings.TextSize
 end
 
-function ESP:_UpdateHighlighter(Visible, OnScreen)
+function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 	local Highlighter = self.UI.Highlighter
 	local Settings = self.CurrentSettings
-	local Enabled = Visible and OnScreen and VeloESP.Settings.Highlighters == true
+	local Enabled = Visible and OnScreen and Alpha > 0.01 and VeloESP.Settings.Highlighters == true
 
 	if Highlighter == nil then
 		return
@@ -873,20 +962,20 @@ function ESP:_UpdateHighlighter(Visible, OnScreen)
 		Highlighter.Adornee = Settings.Model
 		Highlighter.FillColor = self:_GetColor(Settings.FillColor)
 		Highlighter.OutlineColor = self:_GetColor(Settings.OutlineColor)
-		Highlighter.FillTransparency = Settings.FillTransparency
-		Highlighter.OutlineTransparency = Settings.OutlineTransparency
+		Highlighter.FillTransparency = ApplyAlphaTransparency(Settings.FillTransparency, Alpha)
+		Highlighter.OutlineTransparency = ApplyAlphaTransparency(Settings.OutlineTransparency, Alpha)
 	elseif Highlighter:IsA("SelectionBox") then
 		Highlighter.Adornee = Settings.Model
 		Highlighter.Color3 = Color
 		Highlighter.LineThickness = Settings.Thickness
 		Highlighter.SurfaceColor3 = Settings.SurfaceColor
-		Highlighter.SurfaceTransparency = Settings.Transparency
+		Highlighter.SurfaceTransparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
 	else
 		local Part = GetPart(Settings.Model)
 		local _, Size = GetBounds(Settings.Model)
 		Highlighter.Adornee = Part
 		Highlighter.Color3 = Color
-		Highlighter.Transparency = Settings.Transparency
+		Highlighter.Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
 
 		if Size then
 			if Type == "sphereadornment" then
@@ -901,16 +990,23 @@ function ESP:_UpdateHighlighter(Visible, OnScreen)
 	end
 end
 
-function ESP:_UpdateBox2D(Visible, OnScreen)
+function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, MaxX, MaxY)
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box2D
 	local Box = self.UI.Box
-	local BoundsVisible, _, _, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model)
-	local Enabled = Visible and OnScreen and BoundsVisible and BoxSettings.Enabled == true and VeloESP.Settings.Boxes2D == true
-
 	if Box == nil then
 		return
 	end
+
+	if BoxSettings.Enabled ~= true or VeloESP.Settings.Boxes2D ~= true then
+		if Box.Visible then
+			Box.Visible = false
+		end
+
+		return
+	end
+
+	local Enabled = Visible and OnScreen and Alpha > 0.01 and BoundsVisible
 
 	Box.Visible = Enabled
 
@@ -926,7 +1022,7 @@ function ESP:_UpdateBox2D(Visible, OnScreen)
 	self.UI.BoxFill.BackgroundColor3 = Color
 
 	if BoxSettings.Filled then
-		self.UI.BoxFill.BackgroundTransparency = ClampNumber(BoxSettings.FillTransparency, 0, 1, 0.75)
+		self.UI.BoxFill.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.FillTransparency, Alpha)
 	else
 		self.UI.BoxFill.BackgroundTransparency = 1
 	end
@@ -946,15 +1042,20 @@ function ESP:_UpdateBox2D(Visible, OnScreen)
 	for _, Line in pairs(Lines) do
 		Line.Visible = true
 		Line.BackgroundColor3 = Color
-		Line.BackgroundTransparency = ClampNumber(BoxSettings.Transparency, 0, 1, 0)
+		Line.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
 	end
 end
 
-function ESP:_UpdateBox3D(Visible)
+function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box3D
-	local CornerOnScreen, _, ScreenCorners = GetModelCorners(Settings.Model)
-	local Enabled = Visible and CornerOnScreen and BoxSettings.Enabled == true and VeloESP.Settings.Boxes3D == true
+	local Enabled = Visible and Alpha > 0.01 and CornerOnScreen and BoxSettings.Enabled == true and VeloESP.Settings.Boxes3D == true
+
+	if not Enabled and self._Box3DVisible ~= true then
+		return
+	end
+
+	self._Box3DVisible = Enabled
 
 	for Index, Line in ipairs(self.UI.Box3D) do
 		local Pair = Box3DIndices[Index]
@@ -966,7 +1067,7 @@ function ESP:_UpdateBox3D(Visible)
 
 		if ShowLine then
 			Line.BackgroundColor3 = self:_GetColor(BoxSettings.Color)
-			Line.BackgroundTransparency = ClampNumber(BoxSettings.Transparency, 0, 1, 0)
+			Line.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
 			UpdateLine(
 				Line,
 				Vector2.new(PointA.X, PointA.Y),
@@ -999,10 +1100,10 @@ function ESP:_GetTracerOrigin()
 	return Vector2.new(Viewport.X / 2, Viewport.Y)
 end
 
-function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition)
+function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	local Tracer = self.UI.Tracer
 	local Settings = self.CurrentSettings.Tracer
-	local Enabled = Visible and OnScreen and Settings.Enabled == true and VeloESP.Settings.Tracers == true
+	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Enabled == true and VeloESP.Settings.Tracers == true
 
 	if Tracer == nil then
 		return
@@ -1022,13 +1123,13 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition)
 	)
 
 	Tracer.BackgroundColor3 = self:_GetColor(Settings.Color)
-	Tracer.BackgroundTransparency = ClampNumber(Settings.Transparency, 0, 1, 0)
+	Tracer.BackgroundTransparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
 end
 
-function ESP:_UpdateArrow(Visible, OnScreen, ScreenPosition)
+function ESP:_UpdateArrow(Visible, OnScreen, ScreenPosition, Alpha)
 	local Arrow = self.UI.Arrow
 	local Settings = self.CurrentSettings.Arrow
-	local Enabled = Visible and not OnScreen and Settings.Enabled == true and VeloESP.Settings.Arrows == true
+	local Enabled = Visible and Alpha > 0.01 and not OnScreen and Settings.Enabled == true and VeloESP.Settings.Arrows == true
 
 	if Arrow == nil then
 		return
@@ -1068,25 +1169,36 @@ function ESP:_UpdateArrow(Visible, OnScreen, ScreenPosition)
 	Arrow.Position = UDim2.fromOffset(Position.X, Position.Y)
 	Arrow.Rotation = math.deg(math.atan2(Direction.Y, Direction.X))
 	Arrow.TextColor3 = self:_GetColor(Settings.Color)
+	Arrow.TextTransparency = ApplyAlphaTransparency(0, Alpha)
+	Arrow.TextStrokeTransparency = ApplyAlphaTransparency(0, Alpha)
 end
 
-function ESP:_UpdateSkeleton(Visible, OnScreen)
+function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha)
 	local Settings = self.CurrentSettings
 	local SkeletonSettings = Settings.Skeleton
 	local Lines = self.UI.Skeleton
 	local Enabled = Visible
 		and OnScreen
+		and Alpha > 0.01
 		and SkeletonSettings.Enabled == true
 		and VeloESP.Settings.Skeleton == true
 		and typeof(Settings.Model) == "Instance"
 		and Settings.Model:IsA("Model")
 
 	if not Enabled then
+		if self._SkeletonVisible ~= true then
+			return
+		end
+
+		self._SkeletonVisible = false
+
 		for _, Line in ipairs(Lines) do
 			Line.Visible = false
 		end
 		return
 	end
+
+	self._SkeletonVisible = true
 
 	local Humanoid = Settings.Model:FindFirstChildWhichIsA("Humanoid")
 	local RigType = "R6"
@@ -1119,7 +1231,7 @@ function ESP:_UpdateSkeleton(Visible, OnScreen)
 
 		if ShowLine then
 			Line.BackgroundColor3 = self:_GetColor(SkeletonSettings.Color)
-			Line.BackgroundTransparency = ClampNumber(SkeletonSettings.Transparency, 0, 1, 0)
+			Line.BackgroundTransparency = ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha)
 			UpdateLine(
 				Line,
 				Vector2.new(PointA.X, PointA.Y),
@@ -1130,20 +1242,33 @@ function ESP:_UpdateSkeleton(Visible, OnScreen)
 	end
 end
 
-function ESP:_Update()
+function ESP:_GetUpdateRate(Distance)
+	local GlobalRate = tonumber(VeloESP.Settings.UpdateRate) or 0
+
+	if GlobalRate > 0 then
+		return GlobalRate
+	end
+
+	local FarDistance = tonumber(VeloESP.Settings.FarDistance) or 650
+
+	if Distance and Distance >= FarDistance then
+		return tonumber(VeloESP.Settings.FarUpdateRate) or 0
+	end
+
+	return tonumber(VeloESP.Settings.NearUpdateRate) or 0
+end
+
+function ESP:_Update(DeltaTime)
 	if self.Destroyed then
 		return
 	end
+
+	DeltaTime = DeltaTime or 1 / 60
 
 	local Settings = self.CurrentSettings
 
 	if not (Settings.Model and Settings.Model.Parent) then
 		self:Destroy()
-		return
-	end
-
-	if VeloESP.Settings.Enabled ~= true or self.Hidden == true or Settings.Visible == false then
-		self:_HideAll()
 		return
 	end
 
@@ -1154,25 +1279,67 @@ function ESP:_Update()
 		return
 	end
 
-	local Distance = GetDistance(Settings.Model)
-	local Visible = Distance <= Settings.MaxDistance
+	local ActiveCamera = GetCamera()
+	local Distance = math.huge
+
+	if ActiveCamera then
+		Distance = (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+	end
+
+	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
+
+	local BaseVisible = VeloESP.Settings.Enabled == true
+		and self.Hidden ~= true
+		and Settings.Visible ~= false
+		and Distance <= Settings.MaxDistance
+	local TargetAlpha = self:_GetFadeTarget(BaseVisible, Distance)
+	local UpdateRate = self:_GetUpdateRate(Distance)
+	local IsFading = math.abs((self._Alpha or TargetAlpha) - TargetAlpha) > 0.01
+
+	if UpdateRate > 0 and self._UpdateElapsed < UpdateRate and IsFading ~= true then
+		return
+	end
+
+	self._UpdateElapsed = 0
+
+	local Alpha = self:_StepFade(TargetAlpha, DeltaTime)
+	local Visible = Alpha > 0.01
+
+	if Visible ~= true then
+		self:_HideAll()
+		return
+	end
+
 	local ScreenPosition, OnScreen = WorldToViewport(CFrame.Position)
+	local NeedsCorners = OnScreen
+		and (
+			(Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
+			or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
+		)
+	local CornerOnScreen = false
+	local ScreenCorners = nil
+	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
+
+	if NeedsCorners then
+		CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model)
+	end
 
 	self._LastDistance = Distance
 	self._LastScreenPosition = ScreenPosition
 	self._OnScreen = OnScreen
+	self._Alpha = Alpha
 
 	if Settings.BeforeUpdate then
 		SafeCall(Settings.BeforeUpdate, self)
 	end
 
-	self:_UpdateBillboard(Visible, OnScreen, Distance)
-	self:_UpdateHighlighter(Visible, OnScreen)
-	self:_UpdateBox2D(Visible, OnScreen)
-	self:_UpdateBox3D(Visible)
-	self:_UpdateTracer(Visible, OnScreen, ScreenPosition)
-	self:_UpdateArrow(Visible, OnScreen, ScreenPosition)
-	self:_UpdateSkeleton(Visible, OnScreen)
+	self:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
+	self:_UpdateHighlighter(Visible, OnScreen, Alpha)
+	self:_UpdateBox2D(Visible, OnScreen, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
+	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners or {})
+	self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
+	self:_UpdateArrow(Visible, OnScreen, ScreenPosition, Alpha)
+	self:_UpdateSkeleton(Visible, OnScreen, Alpha)
 
 	if Settings.AfterUpdate then
 		SafeCall(Settings.AfterUpdate, self)
@@ -1260,6 +1427,21 @@ function ESP:Destroy()
 	end
 
 	VeloESP._Objects[self.Target] = nil
+
+	if self._ListIndex then
+		local List = VeloESP._ObjectList
+		local Last = List[#List]
+
+		List[self._ListIndex] = Last
+		List[#List] = nil
+
+		if Last and Last ~= self then
+			Last._ListIndex = self._ListIndex
+		end
+
+		self._ListIndex = nil
+	end
+
 	table.clear(self.UI)
 end
 
@@ -1278,12 +1460,20 @@ function VeloESP.new(Target, Options)
 	end
 
 	local Settings = NormalizeOptions(Target, Options)
+	local StartAlpha = 1
+
+	if Settings.Fade.Enabled == true then
+		StartAlpha = 0
+	end
+
 	local Object = setmetatable({
 		Index = Target.Name .. "_" .. tostring(math.random(100000, 999999)),
 		Target = Target,
 		Hidden = false,
 		Destroyed = false,
 		Deleted = false,
+		_Alpha = StartAlpha,
+		_UpdateElapsed = 0,
 		OriginalSettings = DeepCopy(Settings),
 		CurrentSettings = Settings,
 		Options = Settings,
@@ -1291,6 +1481,9 @@ function VeloESP.new(Target, Options)
 	}, ESP)
 
 	VeloESP._Objects[Target] = Object
+	Object._ListIndex = #VeloESP._ObjectList + 1
+	VeloESP._ObjectList[Object._ListIndex] = Object
+
 	Object:_Create()
 	Object:_Update()
 
@@ -1323,13 +1516,15 @@ function VeloESP.Clear()
 		return
 	end
 
-	local Objects = {}
+	for Index = #VeloESP._ObjectList, 1, -1 do
+		local Object = VeloESP._ObjectList[Index]
 
-	for _, Object in pairs(VeloESP._Objects) do
-		table.insert(Objects, Object)
+		if Object then
+			Object:Destroy()
+		end
 	end
 
-	for _, Object in ipairs(Objects) do
+	for _, Object in pairs(VeloESP._Objects) do
 		Object:Destroy()
 	end
 end
@@ -1590,10 +1785,11 @@ function VeloESP.watch(RootObject, Rule)
 end
 
 function VeloESP.WatchPlayers(Options)
+	local PlayerSettings = DeepCopy(Options or {})
 	local Handles = {}
 	local Connections = {}
 	local Controller = {
-		Enabled = Options == nil or Options.Enabled ~= false,
+		Enabled = PlayerSettings.Enabled ~= false,
 		Destroyed = false,
 	}
 
@@ -1611,7 +1807,7 @@ function VeloESP.WatchPlayers(Options)
 
 		RemovePlayer(Player)
 
-		local PlayerOptions = DeepCopy(Options or {})
+		local PlayerOptions = DeepCopy(PlayerSettings)
 		PlayerOptions.Enabled = nil
 		PlayerOptions.Model = Character
 		PlayerOptions.Name = Resolve(PlayerOptions.Name, Player, Player.DisplayName or Player.Name)
@@ -1653,6 +1849,20 @@ function VeloESP.WatchPlayers(Options)
 		else
 			for Player in pairs(Handles) do
 				RemovePlayer(Player)
+			end
+		end
+
+		return self
+	end
+
+	function Controller:Set(NewOptions)
+		assert(typeof(NewOptions) == "table", "Argument #1 must be a table.")
+
+		Merge(PlayerSettings, NewOptions)
+
+		for _, Handle in pairs(Handles) do
+			if Handle and Handle.Destroyed ~= true then
+				Handle:Set(NewOptions)
 			end
 		end
 
@@ -1714,20 +1924,59 @@ table.insert(VeloESP._Connections, workspace:GetPropertyChangedSignal("CurrentCa
 	Camera = workspace.CurrentCamera
 end))
 
-table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function()
+table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(DeltaTime)
 	if VeloESP._Destroyed then
 		return
 	end
 
-	local Objects = {}
+	local ObjectList = VeloESP._ObjectList
+	local Count = #ObjectList
 
-	for _, Object in pairs(VeloESP._Objects) do
-		table.insert(Objects, Object)
+	if Count == 0 then
+		VeloESP._UpdateCursor = 1
+		return
 	end
 
-	for _, Object in ipairs(Objects) do
-		Object:_Update()
+	local MaxPerFrame = tonumber(VeloESP.Settings.MaxPerFrame) or math.huge
+	local Updated = 0
+	local Visited = 0
+	local Index = VeloESP._UpdateCursor or 1
+
+	if Index > Count then
+		Index = 1
 	end
+
+	while Visited < Count do
+		local Object = ObjectList[Index]
+		Visited += 1
+
+		if Object == nil or Object.Destroyed == true then
+			table.remove(ObjectList, Index)
+			Count -= 1
+
+			if Count == 0 then
+				Index = 1
+				break
+			elseif Index > Count then
+				Index = 1
+			end
+		else
+			Object._ListIndex = Index
+			Object:_Update(DeltaTime)
+			Updated += 1
+			Index += 1
+
+			if Index > Count then
+				Index = 1
+			end
+
+			if Updated >= MaxPerFrame then
+				break
+			end
+		end
+	end
+
+	VeloESP._UpdateCursor = Index
 end))
 
 Environment.VeloESP = VeloESP
