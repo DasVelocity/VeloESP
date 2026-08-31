@@ -733,7 +733,7 @@ local SkeletonSegments = {
 }
 
 local VeloESP = {
-	Version = "5.2.0",
+	Version = "5.3.0",
 	_Destroyed = false,
 	_Objects = setmetatable({}, { __mode = "k" }),
 	_ObjectList = {},
@@ -905,6 +905,10 @@ function ESP:_StepFade(TargetAlpha, DeltaTime)
 end
 
 function ESP:_CreateBillboard()
+	if self.UI.Billboard and self.UI.Label then
+		return
+	end
+
 	local Settings = self.CurrentSettings
 	local Adornee = GetPart(Settings.TextModel or Settings.Model)
 
@@ -944,6 +948,10 @@ function ESP:_CreateBillboard()
 end
 
 function ESP:_CreateHighlighter()
+	if self.UI.Highlighter then
+		return
+	end
+
 	local Settings = self.CurrentSettings
 	local Type = Settings.ESPType
 
@@ -1203,9 +1211,23 @@ function ESP:_HideAll()
 end
 
 function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
+	local Settings = self.CurrentSettings
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
-	local Settings = self.CurrentSettings
+
+	-- Freshly generated rigs are often parented before any BasePart exists.
+	-- Retry creation until an adornee becomes available instead of permanently
+	-- losing the text ESP because the first creation attempt happened too early.
+	if (Billboard == nil or Label == nil)
+		and Settings.Text == true
+		and Settings.Billboard ~= false
+		and VeloESP.Settings.Billboards == true
+	then
+		self:_CreateBillboard()
+		Billboard = self.UI.Billboard
+		Label = self.UI.Label
+	end
+
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
 
 	if Billboard == nil or Label == nil then
@@ -1242,8 +1264,20 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 end
 
 function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
-	local Highlighter = self.UI.Highlighter
 	local Settings = self.CurrentSettings
+	local Highlighter = self.UI.Highlighter
+
+	-- Adornment ESP types need a BasePart. If the model was still being built
+	-- when Add() ran, retry until the rig has a usable part.
+	if Highlighter == nil
+		and Settings.Highlight ~= false
+		and Settings.ESPType ~= "text"
+		and VeloESP.Settings.Highlighters == true
+	then
+		self:_CreateHighlighter()
+		Highlighter = self.UI.Highlighter
+	end
+
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and VeloESP.Settings.Highlighters == true
 
 	if Highlighter == nil then
@@ -2257,7 +2291,7 @@ function GeneratedObserver:_Matches(Object)
 	return false
 end
 
-function GeneratedObserver:_Enqueue(Object)
+function GeneratedObserver:_Enqueue(Object, IsScan)
 	if self.Destroyed or self.Enabled ~= true then
 		return
 	end
@@ -2271,7 +2305,12 @@ function GeneratedObserver:_Enqueue(Object)
 	end
 
 	self.Queued[Object] = true
-	self.Queue[#self.Queue + 1] = Object
+
+	if IsScan == true then
+		self.ScanQueue[#self.ScanQueue + 1] = Object
+	else
+		self.Queue[#self.Queue + 1] = Object
+	end
 end
 
 function GeneratedObserver:_ProcessObject(Object)
@@ -2313,6 +2352,23 @@ function GeneratedObserver:_ProcessObject(Object)
 	end
 end
 
+function GeneratedObserver:_PopQueue(Queue, HeadKey)
+	local Head = self[HeadKey]
+	local Object = Queue[Head]
+
+	if Object == nil then
+		if Head > 1 then
+			table.clear(Queue)
+			self[HeadKey] = 1
+		end
+		return nil
+	end
+
+	Queue[Head] = nil
+	self[HeadKey] = Head + 1
+	return Object
+end
+
 function GeneratedObserver:_Flush()
 	if self.Destroyed or self.Enabled ~= true then
 		return
@@ -2322,20 +2378,16 @@ function GeneratedObserver:_Flush()
 	local Processed = 0
 
 	while Processed < MaxPerStep do
-		local Head = self.QueueHead
-		local Object = self.Queue[Head]
+		-- Live generated objects always win over the startup scan backlog.
+		local Object = self:_PopQueue(self.Queue, "QueueHead")
+		if Object == nil then
+			Object = self:_PopQueue(self.ScanQueue, "ScanQueueHead")
+		end
 
 		if Object == nil then
-			if Head > 1 then
-				table.clear(self.Queue)
-				self.QueueHead = 1
-			end
-
 			break
 		end
 
-		self.Queue[Head] = nil
-		self.QueueHead = Head + 1
 		self.Queued[Object] = nil
 		self:_ProcessObject(Object)
 		Processed += 1
@@ -2343,13 +2395,41 @@ function GeneratedObserver:_Flush()
 end
 
 function GeneratedObserver:_Scan()
-	if self.Options.IncludeRoot == true then
-		self:_Enqueue(self.Root)
-	end
+	self.ScanGeneration += 1
+	local Generation = self.ScanGeneration
 
-	for _, Object in ipairs(self.Root:GetDescendants()) do
-		self:_Enqueue(Object)
+	-- Drop any old unfinished scan queue before starting a fresh scan.
+	for Index = self.ScanQueueHead, #self.ScanQueue do
+		local Object = self.ScanQueue[Index]
+		if Object then
+			self.Queued[Object] = nil
+		end
 	end
+	table.clear(self.ScanQueue)
+	self.ScanQueueHead = 1
+
+	local ScanBatchSize = math.max(1, tonumber(self.Options.ScanBatchSize) or 200)
+	local Root = self.Root
+
+	task.spawn(function()
+		if self.Options.IncludeRoot == true then
+			self:_Enqueue(Root, true)
+		end
+
+		local Descendants = Root:GetDescendants()
+
+		for Index, Object in ipairs(Descendants) do
+			if self.Destroyed or self.Enabled ~= true or self.ScanGeneration ~= Generation then
+				return
+			end
+
+			self:_Enqueue(Object, true)
+
+			if Index % ScanBatchSize == 0 then
+				task.wait()
+			end
+		end
+	end)
 end
 
 function GeneratedObserver:SetEnabled(Value)
@@ -2358,8 +2438,11 @@ function GeneratedObserver:SetEnabled(Value)
 	if self.Enabled then
 		self:_Scan()
 	else
+		self.ScanGeneration += 1
 		table.clear(self.Queue)
 		self.QueueHead = 1
+		table.clear(self.ScanQueue)
+		self.ScanQueueHead = 1
 		table.clear(self.Queued)
 
 		for Object, Handle in pairs(self.Handles) do
@@ -2398,9 +2481,12 @@ function GeneratedObserver:Destroy()
 		end
 	end
 
+	self.ScanGeneration += 1
 	table.clear(self.Connections)
 	table.clear(self.Queue)
 	self.QueueHead = 1
+	table.clear(self.ScanQueue)
+	self.ScanQueueHead = 1
 	table.clear(self.Queued)
 	table.clear(self.Handles)
 end
@@ -2421,6 +2507,9 @@ function VeloESP.ObserveGenerated(RootObject, Options)
 		Destroyed = false,
 		Queue = {},
 		QueueHead = 1,
+		ScanQueue = {},
+		ScanQueueHead = 1,
+		ScanGeneration = 0,
 		Queued = setmetatable({}, { __mode = "k" }),
 		Handles = setmetatable({}, { __mode = "k" }),
 		Connections = {},
