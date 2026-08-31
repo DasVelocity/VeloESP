@@ -158,6 +158,35 @@ local function Approach(Current, Target, Step)
 	return Target
 end
 
+local function GetSmoothingAlpha(Speed, DeltaTime)
+	Speed = tonumber(Speed) or 0
+	DeltaTime = math.max(0, tonumber(DeltaTime) or 1 / 60)
+
+	if Speed <= 0 then
+		return 1
+	end
+
+	return 1 - math.exp(-Speed * DeltaTime)
+end
+
+local function SmoothVector2(Current, Target, Speed, DeltaTime)
+	if Target == nil then
+		return nil
+	end
+
+	if Current == nil then
+		return Target
+	end
+
+	local Alpha = GetSmoothingAlpha(Speed, DeltaTime)
+
+	if Alpha >= 1 then
+		return Target
+	end
+
+	return Current + ((Target - Current) * Alpha)
+end
+
 local function ApplyAlphaTransparency(BaseTransparency, Alpha)
 	BaseTransparency = tonumber(BaseTransparency) or 0
 	Alpha = tonumber(Alpha) or 1
@@ -623,6 +652,7 @@ local Defaults = {
 		Thickness = 2,
 		Transparency = 0,
 		From = "Bottom",
+		Smoothness = 20,
 	},
 	Arrow = {
 		Enabled = false,
@@ -665,6 +695,7 @@ local Defaults = {
 		Thickness = 1,
 		Transparency = 0,
 		UpdateRate = 0.045,
+		Smoothness = 16,
 	},
 	Fade = {
 		Enabled = false,
@@ -739,6 +770,7 @@ local VeloESP = {
 	_ObjectList = {},
 	_Watchers = {},
 	_Connections = {},
+	_SmoothObjects = setmetatable({}, { __mode = "k" }),
 	Roots = {
 		Gui = Root,
 		Overlay = OverlayRoot,
@@ -843,7 +875,9 @@ local function NormalizeOptions(Target, Options)
 	Final.EdgeBeacon.TextSize = math.max(8, tonumber(Final.EdgeBeacon.TextSize) or Defaults.EdgeBeacon.TextSize)
 	Final.EdgeBeacon.Transparency = ClampNumber(Final.EdgeBeacon.Transparency, 0, 1, Defaults.EdgeBeacon.Transparency)
 	Final.EdgeBeacon.PulseTransparency = ClampNumber(Final.EdgeBeacon.PulseTransparency, 0, 1, Defaults.EdgeBeacon.PulseTransparency)
+	Final.Tracer.Smoothness = math.max(0, tonumber(Final.Tracer.Smoothness) or Defaults.Tracer.Smoothness)
 	Final.Skeleton.UpdateRate = math.max(0, tonumber(Final.Skeleton.UpdateRate) or Defaults.Skeleton.UpdateRate)
+	Final.Skeleton.Smoothness = math.max(0, tonumber(Final.Skeleton.Smoothness) or Defaults.Skeleton.Smoothness)
 	Final.Fade.Speed = math.max(0, tonumber(Final.Fade.Speed) or Defaults.Fade.Speed)
 	Final.Fade.InSpeed = math.max(0, tonumber(Final.Fade.InSpeed) or Final.Fade.Speed)
 	Final.Fade.OutSpeed = math.max(0, tonumber(Final.Fade.OutSpeed) or Final.Fade.Speed)
@@ -1193,6 +1227,13 @@ function ESP:_HideAll()
 		SetProperty(self.UI.Tracer, "Visible", false)
 	end
 
+	if self._TracerState then
+		self._TracerState.Visible = false
+		self._TracerState.TargetTo = nil
+		self._TracerState.CurrentFrom = nil
+		self._TracerState.CurrentTo = nil
+	end
+
 	if self.UI.EdgeBeacon and self.UI.EdgeBeacon.Root then
 		SetProperty(self.UI.EdgeBeacon.Root, "Visible", false)
 	end
@@ -1208,6 +1249,21 @@ function ESP:_HideAll()
 	for _, Line in pairs(self.UI.Skeleton or {}) do
 		SetProperty(Line, "Visible", false)
 	end
+
+	if self._SkeletonState then
+		self._SkeletonState.VisibleCount = 0
+
+		for _, LineState in pairs(self._SkeletonState.Lines or {}) do
+			LineState.Visible = false
+			LineState.TargetA = nil
+			LineState.TargetB = nil
+			LineState.CurrentA = nil
+			LineState.CurrentB = nil
+		end
+	end
+
+	self._SkeletonVisible = false
+	self:_RefreshSmoothOverlayRegistration()
 end
 
 function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
@@ -1449,30 +1505,151 @@ function ESP:_GetTracerOrigin()
 	return Vector2.new(Viewport.X / 2, Viewport.Y)
 end
 
+function ESP:_RefreshSmoothOverlayRegistration()
+	local Active = false
+	local TracerState = self._TracerState
+
+	if TracerState and TracerState.Visible == true and (tonumber(TracerState.Smoothness) or 0) > 0 then
+		Active = true
+	end
+
+	local SkeletonState = self._SkeletonState
+
+	if SkeletonState and (SkeletonState.VisibleCount or 0) > 0 and (tonumber(SkeletonState.Smoothness) or 0) > 0 then
+		Active = true
+	end
+
+	if Active then
+		VeloESP._SmoothObjects[self] = true
+	else
+		VeloESP._SmoothObjects[self] = nil
+	end
+end
+
+function ESP:_RenderTracer(DeltaTime)
+	local Tracer = self.UI.Tracer
+	local State = self._TracerState
+
+	if Tracer == nil or State == nil or State.Visible ~= true or State.TargetTo == nil then
+		if Tracer then
+			SetProperty(Tracer, "Visible", false)
+		end
+
+		return false
+	end
+
+	State.CurrentFrom = SmoothVector2(State.CurrentFrom, self:_GetTracerOrigin(), State.Smoothness, DeltaTime)
+	State.CurrentTo = SmoothVector2(State.CurrentTo, State.TargetTo, State.Smoothness, DeltaTime)
+
+	SetProperty(Tracer, "Visible", true)
+	UpdateLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness)
+	SetProperty(Tracer, "BackgroundColor3", State.Color)
+	SetProperty(Tracer, "BackgroundTransparency", State.Transparency)
+
+	return true
+end
+
+function ESP:_RenderSkeleton(DeltaTime)
+	local State = self._SkeletonState
+	local Lines = self.UI.Skeleton
+
+	if State == nil or Lines == nil then
+		return false
+	end
+
+	local AnyVisible = false
+
+	for Index, Line in ipairs(Lines) do
+		local LineState = State.Lines and State.Lines[Index]
+		local ShowLine = LineState ~= nil
+			and LineState.Visible == true
+			and LineState.TargetA ~= nil
+			and LineState.TargetB ~= nil
+
+		SetProperty(Line, "Visible", ShowLine == true)
+
+		if ShowLine then
+			LineState.CurrentA = SmoothVector2(LineState.CurrentA, LineState.TargetA, State.Smoothness, DeltaTime)
+			LineState.CurrentB = SmoothVector2(LineState.CurrentB, LineState.TargetB, State.Smoothness, DeltaTime)
+			SetProperty(Line, "BackgroundColor3", State.Color)
+			SetProperty(Line, "BackgroundTransparency", State.Transparency)
+			UpdateLine(Line, LineState.CurrentA, LineState.CurrentB, State.Thickness)
+			AnyVisible = true
+		end
+	end
+
+	return AnyVisible
+end
+
+function ESP:_PresentOverlays(DeltaTime)
+	if self.Destroyed then
+		VeloESP._SmoothObjects[self] = nil
+		return
+	end
+
+	local Active = false
+	local TracerState = self._TracerState
+
+	if TracerState and TracerState.Visible == true and (tonumber(TracerState.Smoothness) or 0) > 0 then
+		Active = self:_RenderTracer(DeltaTime) or Active
+	end
+
+	local SkeletonState = self._SkeletonState
+
+	if SkeletonState and (SkeletonState.VisibleCount or 0) > 0 and (tonumber(SkeletonState.Smoothness) or 0) > 0 then
+		Active = self:_RenderSkeleton(DeltaTime) or Active
+	end
+
+	if not Active then
+		VeloESP._SmoothObjects[self] = nil
+	end
+end
+
 function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	local Tracer = self.UI.Tracer
 	local Settings = self.CurrentSettings.Tracer
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Enabled == true and VeloESP.Settings.Tracers == true
 
 	if Tracer == nil then
+		if self._TracerState then
+			self._TracerState.Visible = false
+			self._TracerState.TargetTo = nil
+		end
+
+		self:_RefreshSmoothOverlayRegistration()
 		return
 	end
-
-	SetProperty(Tracer, "Visible", Enabled)
 
 	if not Enabled then
+		SetProperty(Tracer, "Visible", false)
+
+		if self._TracerState then
+			self._TracerState.Visible = false
+			self._TracerState.TargetTo = nil
+			self._TracerState.CurrentFrom = nil
+			self._TracerState.CurrentTo = nil
+		end
+
+		self:_RefreshSmoothOverlayRegistration()
 		return
 	end
 
-	UpdateLine(
-		Tracer,
-		self:_GetTracerOrigin(),
-		Vector2.new(ScreenPosition.X, ScreenPosition.Y),
-		Settings.Thickness
-	)
+	local State = self._TracerState or {}
+	self._TracerState = State
+	State.Visible = true
+	State.TargetTo = Vector2.new(ScreenPosition.X, ScreenPosition.Y)
+	State.Thickness = Settings.Thickness
+	State.Color = self:_GetColor(Settings.Color)
+	State.Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
+	State.Smoothness = Settings.Smoothness
 
-	SetProperty(Tracer, "BackgroundColor3", self:_GetColor(Settings.Color))
-	SetProperty(Tracer, "BackgroundTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
+	if State.Smoothness <= 0 then
+		State.CurrentFrom = self:_GetTracerOrigin()
+		State.CurrentTo = State.TargetTo
+		self:_RenderTracer(0)
+	end
+
+	self:_RefreshSmoothOverlayRegistration()
 end
 
 function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
@@ -1625,6 +1802,11 @@ end
 
 function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 	if self.UI.Skeleton == nil then
+		if self._SkeletonState then
+			self._SkeletonState.VisibleCount = 0
+			self:_RefreshSmoothOverlayRegistration()
+		end
+
 		return
 	end
 
@@ -1641,6 +1823,11 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 	if not Enabled then
 		if self._SkeletonVisible ~= true then
+			if self._SkeletonState then
+				self._SkeletonState.VisibleCount = 0
+				self:_RefreshSmoothOverlayRegistration()
+			end
+
 			return
 		end
 
@@ -1649,6 +1836,22 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 		for _, Line in ipairs(Lines) do
 			SetProperty(Line, "Visible", false)
 		end
+
+		local State = self._SkeletonState
+
+		if State then
+			State.VisibleCount = 0
+
+			for _, LineState in pairs(State.Lines or {}) do
+				LineState.Visible = false
+				LineState.TargetA = nil
+				LineState.TargetB = nil
+				LineState.CurrentA = nil
+				LineState.CurrentB = nil
+			end
+		end
+
+		self:_RefreshSmoothOverlayRegistration()
 		return
 	end
 
@@ -1659,19 +1862,57 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 	end
 
 	self._SkeletonElapsed = 0
-	self._SkeletonVisible = true
 
 	local Cache = self:_GetSkeletonCache()
 
 	if Cache == nil then
+		self._SkeletonVisible = false
+
+		for _, Line in ipairs(Lines) do
+			SetProperty(Line, "Visible", false)
+		end
+
+		if self._SkeletonState then
+			self._SkeletonState.VisibleCount = 0
+		end
+
+		self:_RefreshSmoothOverlayRegistration()
 		return
 	end
 
+	local State = self._SkeletonState
+
+	if State == nil then
+		State = {
+			Lines = table.create(#Lines),
+			VisibleCount = 0,
+		}
+		self._SkeletonState = State
+	end
+
+	State.Color = self:_GetColor(SkeletonSettings.Color)
+	State.Transparency = ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha)
+	State.Thickness = SkeletonSettings.Thickness
+	State.Smoothness = SkeletonSettings.Smoothness
+
+	local VisibleCount = 0
+
 	for Index, Line in ipairs(Lines) do
 		local Segment = Cache.Segments[Index]
+		local LineState = State.Lines[Index]
+
+		if LineState == nil then
+			LineState = {}
+			State.Lines[Index] = LineState
+		end
 
 		if Segment == nil then
 			SetProperty(Line, "Visible", false)
+			LineState.Visible = false
+			LineState.TargetA = nil
+			LineState.TargetB = nil
+			LineState.CurrentA = nil
+			LineState.CurrentB = nil
 			continue
 		end
 
@@ -1679,6 +1920,11 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 		if Parts == nil or Parts[1].Parent == nil or Parts[2].Parent == nil then
 			SetProperty(Line, "Visible", false)
+			LineState.Visible = false
+			LineState.TargetA = nil
+			LineState.TargetB = nil
+			LineState.CurrentA = nil
+			LineState.CurrentB = nil
 			continue
 		end
 
@@ -1687,19 +1933,29 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 		local PointA = WorldToViewport(First.Position)
 		local PointB = WorldToViewport(Second.Position)
 		local ShowLine = PointA.Z > 0 and PointB.Z > 0
-		SetProperty(Line, "Visible", ShowLine)
+		LineState.Visible = ShowLine == true
 
 		if ShowLine then
-			SetProperty(Line, "BackgroundColor3", self:_GetColor(SkeletonSettings.Color))
-			SetProperty(Line, "BackgroundTransparency", ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha))
-			UpdateLine(
-				Line,
-				Vector2.new(PointA.X, PointA.Y),
-				Vector2.new(PointB.X, PointB.Y),
-				SkeletonSettings.Thickness
-			)
+			VisibleCount += 1
+			LineState.TargetA = Vector2.new(PointA.X, PointA.Y)
+			LineState.TargetB = Vector2.new(PointB.X, PointB.Y)
+		else
+			SetProperty(Line, "Visible", false)
+			LineState.TargetA = nil
+			LineState.TargetB = nil
+			LineState.CurrentA = nil
+			LineState.CurrentB = nil
 		end
 	end
+
+	State.VisibleCount = VisibleCount
+	self._SkeletonVisible = VisibleCount > 0
+
+	if VisibleCount > 0 and State.Smoothness <= 0 then
+		self:_RenderSkeleton(0)
+	end
+
+	self:_RefreshSmoothOverlayRegistration()
 end
 
 function ESP:_GetUpdateRate(Distance)
@@ -1814,7 +2070,19 @@ function ESP:Set(Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
 	self._SkeletonCache = nil
+	self._TracerState = nil
+	self._SkeletonState = nil
 	self._TextAdornee = nil
+	self._SkeletonVisible = false
+	VeloESP._SmoothObjects[self] = nil
+
+	if self.UI.Tracer then
+		SetProperty(self.UI.Tracer, "Visible", false)
+	end
+
+	for _, Line in pairs(self.UI.Skeleton or {}) do
+		SetProperty(Line, "Visible", false)
+	end
 
 	local Settings = self.CurrentSettings
 	local NeedsOverlay = Settings.Tracer.Enabled == true
@@ -1883,6 +2151,7 @@ function ESP:Destroy()
 
 	self.Destroyed = true
 	self.Deleted = true
+	VeloESP._SmoothObjects[self] = nil
 	SetHighlightConflictProtection(self, false)
 
 	if self.OriginalSettings.OnDestroy then
@@ -2792,6 +3061,14 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 	end
 
 	VeloESP._UpdateCursor = Index
+
+	for Object in pairs(VeloESP._SmoothObjects) do
+		if Object.Destroyed == true then
+			VeloESP._SmoothObjects[Object] = nil
+		else
+			Object:_PresentOverlays(DeltaTime)
+		end
+	end
 end))
 
 Environment.VeloESP = VeloESP
