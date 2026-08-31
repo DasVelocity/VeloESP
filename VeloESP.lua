@@ -652,7 +652,7 @@ local Defaults = {
 		Thickness = 2,
 		Transparency = 0,
 		From = "Bottom",
-		Smoothness = 20,
+		Smoothness = 28,
 	},
 	Arrow = {
 		Enabled = false,
@@ -1538,7 +1538,24 @@ function ESP:_RenderTracer(DeltaTime)
 		return false
 	end
 
-	State.CurrentFrom = SmoothVector2(State.CurrentFrom, self:_GetTracerOrigin(), State.Smoothness, DeltaTime)
+	local Model = self.CurrentSettings and self.CurrentSettings.Model
+
+	if typeof(Model) == "Instance" and Model.Parent ~= nil then
+		local CFrame = GetCFrame(Model)
+
+		if CFrame ~= nil then
+			local ScreenPosition = WorldToViewport(CFrame.Position)
+
+			if ScreenPosition.Z > 0 then
+				State.TargetTo = Vector2.new(ScreenPosition.X, ScreenPosition.Y)
+			else
+				SetProperty(Tracer, "Visible", false)
+				return false
+			end
+		end
+	end
+
+	State.CurrentFrom = self:_GetTracerOrigin()
 	State.CurrentTo = SmoothVector2(State.CurrentTo, State.TargetTo, State.Smoothness, DeltaTime)
 
 	SetProperty(Tracer, "Visible", true)
