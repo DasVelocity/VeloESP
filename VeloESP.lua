@@ -686,7 +686,7 @@ local Defaults = {
 		Thickness = 2,
 		Transparency = 0,
 		From = "Bottom",
-		Smoothness = 28,
+		Smoothness = 0,
 	},
 	Arrow = {
 		Enabled = false,
