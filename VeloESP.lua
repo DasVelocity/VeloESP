@@ -438,6 +438,160 @@ local HiddenRoot = New("Folder", {
 	Name = "VeloESPStorage",
 })
 
+-- Roblox does not expose a render-priority property for Highlight objects.
+-- Keep VeloESP highlights authoritative by temporarily suppressing overlapping
+-- game highlights and restoring their intended Enabled state afterward.
+local HighlightRegistry = setmetatable({}, { __mode = "k" })
+local ActiveHighlightESPs = setmetatable({}, { __mode = "k" })
+
+local function TargetsOverlap(First, Second)
+	if typeof(First) ~= "Instance" or typeof(Second) ~= "Instance" then
+		return false
+	end
+
+	return First == Second or First:IsDescendantOf(Second) or Second:IsDescendantOf(First)
+end
+
+local function ApplyHighlightRecord(Record)
+	local Highlight = Record.Highlight
+	if Highlight == nil or Highlight.Parent == nil then
+		return
+	end
+
+	local ShouldSuppress = next(Record.Suppressors) ~= nil
+	local Wanted = Record.WantedEnabled == true
+
+	Record.InternalChange = true
+	if ShouldSuppress then
+		if Highlight.Enabled then
+			Highlight.Enabled = false
+		end
+	elseif Highlight.Enabled ~= Wanted then
+		Highlight.Enabled = Wanted
+	end
+	Record.InternalChange = false
+end
+
+local function RefreshRegisteredHighlight(Record)
+	local Highlight = Record.Highlight
+	if Highlight == nil or Highlight.Parent == nil then
+		return
+	end
+
+	for Object in pairs(Record.Suppressors) do
+		if Object._SuppressedHighlights then
+			Object._SuppressedHighlights[Highlight] = nil
+		end
+	end
+	table.clear(Record.Suppressors)
+
+	local Adornee = Highlight.Adornee
+	if Adornee ~= nil then
+		for Object in pairs(ActiveHighlightESPs) do
+			if Object.Destroyed ~= true and Object._HighlighterActive == true and TargetsOverlap(Object.CurrentSettings.Model, Adornee) then
+				Record.Suppressors[Object] = true
+				Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
+				Object._SuppressedHighlights[Highlight] = true
+			end
+		end
+	end
+
+	ApplyHighlightRecord(Record)
+end
+
+local function RegisterExternalHighlight(Highlight)
+	if not Highlight:IsA("Highlight") or Highlight:IsDescendantOf(WorldRoot) or HighlightRegistry[Highlight] then
+		return
+	end
+
+	local Record = {
+		Highlight = Highlight,
+		WantedEnabled = Highlight.Enabled,
+		InternalChange = false,
+		Suppressors = setmetatable({}, { __mode = "k" }),
+	}
+	HighlightRegistry[Highlight] = Record
+
+	Record.EnabledConnection = Highlight:GetPropertyChangedSignal("Enabled"):Connect(function()
+		if Record.InternalChange then
+			return
+		end
+
+		Record.WantedEnabled = Highlight.Enabled
+		if next(Record.Suppressors) ~= nil and Highlight.Enabled then
+			ApplyHighlightRecord(Record)
+		end
+	end)
+
+	Record.AdorneeConnection = Highlight:GetPropertyChangedSignal("Adornee"):Connect(function()
+		RefreshRegisteredHighlight(Record)
+	end)
+
+	RefreshRegisteredHighlight(Record)
+end
+
+local function UnregisterExternalHighlight(Highlight)
+	local Record = HighlightRegistry[Highlight]
+	if Record == nil then
+		return
+	end
+
+	for Object in pairs(Record.Suppressors) do
+		if Object._SuppressedHighlights then
+			Object._SuppressedHighlights[Highlight] = nil
+		end
+	end
+
+	if Record.EnabledConnection then
+		Record.EnabledConnection:Disconnect()
+	end
+	if Record.AdorneeConnection then
+		Record.AdorneeConnection:Disconnect()
+	end
+
+	HighlightRegistry[Highlight] = nil
+end
+
+local function SetHighlightConflictProtection(Object, Active)
+	if Active then
+		if Object._HighlighterActive == true then
+			return
+		end
+
+		Object._HighlighterActive = true
+		ActiveHighlightESPs[Object] = true
+		Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
+
+		for Highlight, Record in pairs(HighlightRegistry) do
+			if Highlight.Parent and TargetsOverlap(Object.CurrentSettings.Model, Highlight.Adornee) then
+				Record.Suppressors[Object] = true
+				Object._SuppressedHighlights[Highlight] = true
+				ApplyHighlightRecord(Record)
+			end
+		end
+		return
+	end
+
+	if Object._HighlighterActive ~= true then
+		return
+	end
+
+	Object._HighlighterActive = false
+	ActiveHighlightESPs[Object] = nil
+
+	for Highlight in pairs(Object._SuppressedHighlights or {}) do
+		local Record = HighlightRegistry[Highlight]
+		if Record then
+			Record.Suppressors[Object] = nil
+			ApplyHighlightRecord(Record)
+		end
+	end
+
+	if Object._SuppressedHighlights then
+		table.clear(Object._SuppressedHighlights)
+	end
+end
+
 local Defaults = {
 	Name = nil,
 	Model = nil,
@@ -445,7 +599,7 @@ local Defaults = {
 	Visible = true,
 	Color = Color3.new(1, 1, 1),
 	MaxDistance = 5000,
-	Offset = Vector3.new(0, 2.5, 0),
+	Offset = Vector3.zero,
 	StudsOffset = nil,
 	TextSize = 14,
 	Font = nil,
@@ -579,7 +733,7 @@ local SkeletonSegments = {
 }
 
 local VeloESP = {
-	Version = "5.1.0",
+	Version = "5.2.0",
 	_Destroyed = false,
 	_Objects = setmetatable({}, { __mode = "k" }),
 	_ObjectList = {},
@@ -608,7 +762,7 @@ local VeloESP = {
 		Boxes2D = true,
 		Boxes3D = true,
 		Skeleton = false,
-		Font = Enum.Font.RobotoMono,
+		Font = Enum.Font.Oswald,
 		TextSize = 14,
 		UpdateRate = 0,
 		NearUpdateRate = 0,
@@ -786,6 +940,7 @@ function ESP:_CreateBillboard()
 
 	self.UI.Billboard = Billboard
 	self.UI.Label = Label
+	self._TextAdornee = Adornee
 end
 
 function ESP:_CreateHighlighter()
@@ -797,16 +952,18 @@ function ESP:_CreateHighlighter()
 	end
 
 	local Target = Settings.Model
-	local Part = GetPart(Target)
-	local _, Size = GetBounds(Target)
+	local Part = nil
+	local Size = nil
 	local Highlighter = nil
 
 	if string.find(Type, "adornment") then
+		Part = GetPart(Target)
 		if Part == nil then
 			return
 		end
 
-		Size = Size or Part.Size
+		local _, BoundsSize = GetBounds(Target)
+		Size = BoundsSize or Part.Size
 
 		if Type == "sphereadornment" then
 			Highlighter = New("SphereHandleAdornment", {
@@ -932,7 +1089,7 @@ function ESP:_CreateOverlay()
 		Name = "Label",
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		Font = Enum.Font.RobotoMono,
+		Font = VeloESP.Settings.Font,
 		Position = UDim2.fromOffset(0, 30),
 		Size = UDim2.fromOffset(132, 20),
 		Text = "",
@@ -989,7 +1146,17 @@ end
 function ESP:_Create()
 	self:_CreateBillboard()
 	self:_CreateHighlighter()
-	self:_CreateOverlay()
+
+	local Settings = self.CurrentSettings
+	local NeedsOverlay = Settings.Tracer.Enabled == true
+		or Settings.EdgeBeacon.Enabled == true
+		or Settings.Box2D.Enabled == true
+		or Settings.Box3D.Enabled == true
+		or Settings.Skeleton.Enabled == true
+
+	if NeedsOverlay then
+		self:_CreateOverlay()
+	end
 end
 
 function ESP:_SetHighlighterVisible(Visible)
@@ -1000,6 +1167,7 @@ function ESP:_SetHighlighterVisible(Visible)
 	end
 
 	if Highlighter:IsA("Highlight") then
+		SetHighlightConflictProtection(self, Visible == true)
 		SetProperty(Highlighter, "Enabled", Visible)
 	else
 		SetProperty(Highlighter, "Visible", Visible)
@@ -1057,7 +1225,13 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 		Text = string.format('%s\n<font size="11">[%d studs]</font>', Name, math.floor(Distance + 0.5))
 	end
 
-	SetProperty(Billboard, "Adornee", GetPart(Settings.TextModel or Settings.Model))
+	local TextTarget = Settings.TextModel or Settings.Model
+	local Adornee = self._TextAdornee
+	if Adornee == nil or Adornee.Parent == nil or (Adornee ~= TextTarget and not Adornee:IsDescendantOf(TextTarget)) then
+		Adornee = GetPart(TextTarget)
+		self._TextAdornee = Adornee
+	end
+	SetProperty(Billboard, "Adornee", Adornee)
 	SetProperty(Billboard, "StudsOffset", Settings.StudsOffset)
 	SetProperty(Label, "Text", Text)
 	SetProperty(Label, "TextColor3", self:_GetColor(Settings.Color))
@@ -1174,6 +1348,10 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 end
 
 function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
+	if self.UI.Box3D == nil then
+		return
+	end
+
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box3D
 	local Enabled = Visible and Alpha > 0.01 and CornerOnScreen and BoxSettings.Enabled == true and VeloESP.Settings.Boxes3D == true
@@ -1185,7 +1363,7 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	self._Box3DVisible = Enabled
 
 	if not Enabled or ScreenCorners == nil then
-		for _, Line in ipairs(self.UI.Box3D) do
+		for _, Line in ipairs(self.UI.Box3D or {}) do
 			SetProperty(Line, "Visible", false)
 		end
 		return
@@ -1194,7 +1372,7 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	local Color = self:_GetColor(BoxSettings.Color)
 	local Transparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
 
-	for Index, Line in ipairs(self.UI.Box3D) do
+	for Index, Line in ipairs(self.UI.Box3D or {}) do
 		local Pair = Box3DIndices[Index]
 		local PointA = Pair and ScreenCorners[Pair[1]]
 		local PointB = Pair and ScreenCorners[Pair[2]]
@@ -1412,9 +1590,13 @@ function ESP:_GetSkeletonCache()
 end
 
 function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
+	if self.UI.Skeleton == nil then
+		return
+	end
+
 	local Settings = self.CurrentSettings
 	local SkeletonSettings = Settings.Skeleton
-	local Lines = self.UI.Skeleton
+	local Lines = self.UI.Skeleton or {}
 	local Enabled = Visible
 		and OnScreen
 		and Alpha > 0.01
@@ -1598,6 +1780,18 @@ function ESP:Set(Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
 	self._SkeletonCache = nil
+	self._TextAdornee = nil
+
+	local Settings = self.CurrentSettings
+	local NeedsOverlay = Settings.Tracer.Enabled == true
+		or Settings.EdgeBeacon.Enabled == true
+		or Settings.Box2D.Enabled == true
+		or Settings.Box3D.Enabled == true
+		or Settings.Skeleton.Enabled == true
+
+	if NeedsOverlay and self.UI.Tracer == nil then
+		self:_CreateOverlay()
+	end
 
 	return self
 end
@@ -1611,7 +1805,11 @@ end
 function ESP:Hide()
 	self.Hidden = true
 	self.CurrentSettings.Visible = false
-	self:_HideAll()
+
+	if self.CurrentSettings.Fade.Enabled ~= true then
+		self:_HideAll()
+	end
+
 	return self
 end
 
@@ -1651,6 +1849,7 @@ function ESP:Destroy()
 
 	self.Destroyed = true
 	self.Deleted = true
+	SetHighlightConflictProtection(self, false)
 
 	if self.OriginalSettings.OnDestroy then
 		SafeCall(self.OriginalSettings.OnDestroy.Fire, self.OriginalSettings.OnDestroy)
@@ -2386,6 +2585,11 @@ function VeloESP.Destroy()
 	end
 
 	table.clear(VeloESP._Connections)
+
+	for Highlight in pairs(HighlightRegistry) do
+		UnregisterExternalHighlight(Highlight)
+	end
+
 	Destroy(Root)
 	Destroy(HiddenRoot)
 
@@ -2393,6 +2597,24 @@ function VeloESP.Destroy()
 		Environment.VeloESP = nil
 	end
 end
+
+for _, Descendant in ipairs(workspace:GetDescendants()) do
+	if Descendant:IsA("Highlight") then
+		RegisterExternalHighlight(Descendant)
+	end
+end
+
+table.insert(VeloESP._Connections, workspace.DescendantAdded:Connect(function(Descendant)
+	if Descendant:IsA("Highlight") then
+		RegisterExternalHighlight(Descendant)
+	end
+end))
+
+table.insert(VeloESP._Connections, workspace.DescendantRemoving:Connect(function(Descendant)
+	if Descendant:IsA("Highlight") then
+		UnregisterExternalHighlight(Descendant)
+	end
+end))
 
 table.insert(VeloESP._Connections, workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 	Camera = workspace.CurrentCamera
