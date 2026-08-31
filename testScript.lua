@@ -77,10 +77,14 @@ local function BuildESPAdapter()
         OutlineTransparency = 0,
         TextTransparency = 0,
         TextOutlineTransparency = 0,
+        ESPType = "Box",
+        StudsOffset = Vector3.zero,
         MaxDistance = 240,
         TextSize = 20,
         FadeTime = 0.25,
+        FadeOutTime = 0.18,
         FadeSpeed = 4,
+        FadeOutSpeed = 6,
         TracerThickness = 0.75,
         TracerFrom = "Bottom",
         ArrowRadius = 250,
@@ -90,16 +94,17 @@ local function BuildESPAdapter()
     VeloESP.Configure({
         Rainbow = false,
         Distance = true,
+        ESPType = "Box",
         Tracers = false,
         Arrows = false,
         EdgeBeacons = false,
-        Font = Enum.Font.Highway,
+        Font = Enum.Font.Oswald,
         UpdateRate = 0,
-        NearUpdateRate = 0,
-        FarUpdateRate = 0.12,
-        FarDistance = 450,
-        MaxPerFrame = 90,
-        FrameBudget = 1 / 360,
+        NearUpdateRate = 1 / 60,
+        FarUpdateRate = 0.2,
+        FarDistance = 350,
+        MaxPerFrame = 55,
+        FrameBudget = 1 / 650,
         BudgetCheckInterval = 8,
     })
 
@@ -140,6 +145,8 @@ local function BuildESPAdapter()
                 SurfaceColor = Color,
                 TextTransparency = Defaults.TextTransparency,
                 TextStrokeTransparency = Defaults.TextOutlineTransparency,
+                ESPType = Defaults.ESPType,
+                StudsOffset = Defaults.StudsOffset,
             })
             Existing:SetEveryColor(Color, true)
             return Existing
@@ -149,18 +156,19 @@ local function BuildESPAdapter()
             return VeloESP:Add({
                 Name = tostring(Info.Text or Object.Name),
                 Model = Object,
-                ESPType = "Highlight",
+                ESPType = Defaults.ESPType,
                 Color = Color,
                 FillColor = Color,
                 OutlineColor = Color,
                 SurfaceColor = Color,
+                StudsOffset = Defaults.StudsOffset,
                 FillTransparency = Defaults.FillTransparency,
                 OutlineTransparency = Defaults.OutlineTransparency,
                 TextTransparency = Defaults.TextTransparency,
                 TextStrokeTransparency = Defaults.TextOutlineTransparency,
                 TextSize = Defaults.TextSize,
                 MaxDistance = Defaults.MaxDistance,
-                Fade = { Enabled = Defaults.FadeTime > 0, Speed = Defaults.FadeSpeed, OutSpeed = Defaults.FadeSpeed },
+                Fade = { Enabled = Defaults.FadeTime > 0 or Defaults.FadeOutTime > 0, Speed = Defaults.FadeSpeed, InSpeed = Defaults.FadeSpeed, OutSpeed = Defaults.FadeOutSpeed },
                 Tracer = { Enabled = true, Color = Color, Thickness = Defaults.TracerThickness, Transparency = Defaults.TextTransparency, From = Defaults.TracerFrom },
                 EdgeBeacon = { Enabled = true, Color = Color, Margin = Defaults.ArrowMargin, Length = 42, DotSize = 10, Pulse = false, Label = true, Distance = true },
                 OnDestroyFunc = function()
@@ -185,7 +193,13 @@ local function BuildESPAdapter()
         Handles[Object] = nil
         self.ColorTable[Object] = nil
         if Handle and not Handle.Deleted then
-            pcall(function() Handle:Destroy() end)
+            pcall(function()
+                if Defaults.FadeOutTime > 0 and Handle.FadeOutDestroy then
+                    Handle:FadeOutDestroy()
+                else
+                    Handle:Destroy()
+                end
+            end)
         end
     end
 
@@ -237,7 +251,14 @@ local function BuildESPAdapter()
         Defaults.FadeTime = math.clamp(tonumber(Value) or 0, 0, 1)
         Defaults.FadeSpeed = Defaults.FadeTime > 0 and math.max(1, 1 / Defaults.FadeTime) or 0
         ForEachHandle(function(Handle)
-            Handle:Set({ Fade = { Enabled = Defaults.FadeTime > 0, Speed = Defaults.FadeSpeed, OutSpeed = Defaults.FadeSpeed } })
+            Handle:Set({ Fade = { Enabled = Defaults.FadeTime > 0 or Defaults.FadeOutTime > 0, Speed = Defaults.FadeSpeed, InSpeed = Defaults.FadeSpeed, OutSpeed = Defaults.FadeOutSpeed } })
+        end)
+    end
+    function Adapter:SetFadeOutTime(Value)
+        Defaults.FadeOutTime = math.clamp(tonumber(Value) or 0, 0, 1)
+        Defaults.FadeOutSpeed = Defaults.FadeOutTime > 0 and math.max(1, 1 / Defaults.FadeOutTime) or 0
+        ForEachHandle(function(Handle)
+            Handle:Set({ Fade = { Enabled = Defaults.FadeTime > 0 or Defaults.FadeOutTime > 0, Speed = Defaults.FadeSpeed, InSpeed = Defaults.FadeSpeed, OutSpeed = Defaults.FadeOutSpeed } })
         end)
     end
 
@@ -250,6 +271,12 @@ local function BuildESPAdapter()
             VeloESP.GlobalConfig.Font = Value
             ForEachHandle(function(Handle) Handle:Set({ Font = Value }) end)
         end
+    end
+    function Adapter:SetESPType(Value)
+        local Type = tostring(Value or "Box")
+        Defaults.ESPType = Type
+        VeloESP.GlobalConfig.ESPType = Type
+        ForEachHandle(function(Handle) Handle:Set({ ESPType = Type }) end)
     end
 
     function Adapter:SetTracers(Value) VeloESP.GlobalConfig.Tracers = Value == true end
@@ -4595,18 +4622,24 @@ end)
 
 Groupboxes.Visuals_ESP_Settings:AddToggle("ESPRainbow",     { Text = "Rainbow Colors", Default = false, Tooltip = "Makes the esp objects change colour like a rainbow." })
 Groupboxes.Visuals_ESP_Settings:AddToggle("ESPShowDistance",{ Text = "Show Distance",  Default = true,  Tooltip = "Shows how far away your character is from the object." })
+Groupboxes.Visuals_ESP_Settings:AddDropdown("ESPType", {
+	Text = "ESP Type",
+	Values = { "Box", "SelectionBox", "Highlight", "Sphere", "Cylinder", "Text" },
+	Default = 1
+})
 Groupboxes.Visuals_ESP_Settings:AddDivider()
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPFillTransparency",        { Text = "Fill Transparency",         Min = 0, Max = 1, Default = 0.75, Rounding = 2, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPOutlineTransparency",     { Text = "Outline Transparency",      Min = 0, Max = 1, Default = 0,    Rounding = 2, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPTextTransparency",        { Text = "Text Transparency",         Min = 0, Max = 1, Default = 0,    Rounding = 2, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPTextOutlineTransparency", { Text = "Text Outline Transparency", Min = 0, Max = 1, Default = 0,    Rounding = 2, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPFadeTime",                { Text = "Fade Time",                 Min = 0, Max = 1, Default = 0.25, Rounding = 2, Compact = true })
+Groupboxes.Visuals_ESP_Settings:AddSlider("ESPFadeOutTime",             { Text = "Fade Out Time",             Min = 0, Max = 1, Default = 0.18, Rounding = 2, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPRenderLimit",             { Text = "Render Limit",              Min = 30, Max = 240, Default = 240, Rounding = 0, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddSlider("ESPTextSize",                { Text = "Text Size",                 Min = 12, Max = 24, Default = 20, Rounding = 0, Compact = true })
 Groupboxes.Visuals_ESP_Settings:AddDropdown("ESPTextFont", {
 	Text = "Text Font",
 	Values = { "Legacy","Arial","ArialBold","SourceSans","SourceSansBold","SourceSansLight","SourceSansItalic","Bodoni","Garamond","Cartoon","Code","Highway","SciFi","Arcade","Fantasy","Antique","SourceSansSemibold","Gotham","GothamMedium","GothamBold","GothamBlack","AmaticSC","Bangers","Creepster","DenkOne","Fondamento","FredokaOne","GrenzeGotisch","IndieFlower","JosefinSans","Jura","Kalam","LuckiestGuy","Merriweather","Michroma","Nunito","Oswald","PatrickHand","PermanentMarker","Roboto","RobotoCondensed","RobotoMono","Sarpanch","SpecialElite","TitilliumWeb","Ubuntu","BuilderSans","BuilderSansMedium","BuilderSansBold","BuilderSansExtraBold","Arimo","ArimoBold" },
-	Default = 12
+	Default = 37
 })
 Groupboxes.Visuals_ESP_Settings:AddDivider()
 Groupboxes.Visuals_ESP_Settings:AddDropdown("ESPTracersOrigin",  { Text = "Tracer Origin", Values = { "Bottom","Center","Top","Mouse" }, Default = 1 })
@@ -4618,14 +4651,16 @@ Groupboxes.Visuals_ESP_Settings:AddToggle("ESPArrowsToggle",     { Text = "Off-S
 
 Ostium.ESPLibrary:SetRainbow(false)
 Ostium.ESPLibrary:SetShowDistance(true)
+Ostium.ESPLibrary:SetESPType("Box")
 Ostium.ESPLibrary:SetFillTransparency(0.75)
 Ostium.ESPLibrary:SetOutlineTransparency(0)
 Ostium.ESPLibrary:SetTextTransparency(0)
 Ostium.ESPLibrary:SetTextOutlineTransparency(0)
 Ostium.ESPLibrary:SetRenderLimit(240)
 Ostium.ESPLibrary:SetFadeTime(0.25)
+Ostium.ESPLibrary:SetFadeOutTime(0.18)
 Ostium.ESPLibrary:SetTextSize(20)
-Ostium.ESPLibrary:SetFont(Enum.Font.Highway)
+Ostium.ESPLibrary:SetFont(Enum.Font.Oswald)
 Ostium.ESPLibrary:SetTracers(false)
 Ostium.ESPLibrary:SetTracerSize(0.75)
 Ostium.ESPLibrary:SetTracerOrigin("Bottom")
@@ -4635,11 +4670,13 @@ Ostium.ESPLibrary:SetDistanceSizeRatio(0.8)
 
 Toggles.ESPRainbow:OnChanged(function(V)        Ostium.ESPLibrary:SetRainbow(V) end)
 Toggles.ESPShowDistance:OnChanged(function(V)   Ostium.ESPLibrary:SetShowDistance(V) end)
+Options.ESPType:OnChanged(function(V)           Ostium.ESPLibrary:SetESPType(V) end)
 Options.ESPFillTransparency:OnChanged(function(V)        Ostium.ESPLibrary:SetFillTransparency(V) end)
 Options.ESPOutlineTransparency:OnChanged(function(V)     Ostium.ESPLibrary:SetOutlineTransparency(V) end)
 Options.ESPTextTransparency:OnChanged(function(V)        Ostium.ESPLibrary:SetTextTransparency(V) end)
 Options.ESPTextOutlineTransparency:OnChanged(function(V) Ostium.ESPLibrary:SetTextOutlineTransparency(V) end)
 Options.ESPFadeTime:OnChanged(function(V)        Ostium.ESPLibrary:SetFadeTime(V) end)
+Options.ESPFadeOutTime:OnChanged(function(V)     Ostium.ESPLibrary:SetFadeOutTime(V) end)
 Options.ESPRenderLimit:OnChanged(function(V)     Ostium.ESPLibrary:SetRenderLimit(V) end)
 Options.ESPTextSize:OnChanged(function(V)        Ostium.ESPLibrary:SetTextSize(V) end)
 Options.ESPTextFont:OnChanged(function(V)        Ostium.ESPLibrary:SetFont(Enum.Font[V]) end)
@@ -7257,6 +7294,7 @@ local AllowedInstances = {
 
 Connections.GeneratedObjectObserver = Ostium.ESPLibrary:ObserveGenerated(Services.Workspace, {
 	MaxPerStep = 1,
+	ScanBatchSize = 180,
 	Match = function(Object)
 		return AllowedInstances[Object.Name]
 			or Object.ClassName == "ProximityPrompt"

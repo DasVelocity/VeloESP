@@ -265,6 +265,18 @@ local function GetBounds(Target)
 	return nil, nil
 end
 
+local function HasExternalHighlight(Target)
+	if typeof(Target) ~= "Instance" then
+		return false
+	end
+
+	if Target:IsA("Highlight") then
+		return true
+	end
+
+	return Target:FindFirstChildWhichIsA("Highlight", true) ~= nil
+end
+
 local function WorldToViewport(Position)
 	local ActiveCamera = GetCamera()
 
@@ -300,14 +312,16 @@ local function GetDistance(Target, From)
 	return math.huge
 end
 
-local function UpdateLine(Frame, PointA, PointB, Thickness)
-	local Delta = PointB - PointA
-	local Center = PointA + Delta / 2
+local function UpdateLine(Frame, AX, AY, BX, BY, Thickness)
+	local DeltaX = BX - AX
+	local DeltaY = BY - AY
+	local Length = math.sqrt((DeltaX * DeltaX) + (DeltaY * DeltaY))
+	local CenterX = AX + (DeltaX / 2)
+	local CenterY = AY + (DeltaY / 2)
 
-	SetProperty(Frame, "AnchorPoint", Vector2.new(0.5, 0.5))
-	SetProperty(Frame, "Position", UDim2.fromOffset(Center.X, Center.Y))
-	SetProperty(Frame, "Size", UDim2.fromOffset(math.max(1, Delta.Magnitude), math.max(1, Thickness)))
-	SetProperty(Frame, "Rotation", math.deg(math.atan2(Delta.Y, Delta.X)))
+	SetProperty(Frame, "Position", UDim2.fromOffset(CenterX, CenterY))
+	SetProperty(Frame, "Size", UDim2.fromOffset(math.max(1, Length), math.max(1, Thickness)))
+	SetProperty(Frame, "Rotation", math.deg(math.atan2(DeltaY, DeltaX)))
 end
 
 local ModelCornerSigns = {
@@ -362,10 +376,11 @@ local function GetModelCorners(Target, ScreenCorners)
 	return OnScreen, nil, ScreenCorners, MinX, MinY, MaxX, MaxY
 end
 
-local function CreateLine(Parent, Name)
+local function CreateLine(Parent, Name, Centered)
 	return New("Frame", {
 		Parent = Parent,
 		Name = Name,
+		AnchorPoint = Centered == true and Vector2.new(0.5, 0.5) or Vector2.zero,
 		BackgroundColor3 = Color3.new(1, 1, 1),
 		BorderSizePixel = 0,
 		Visible = false,
@@ -445,7 +460,7 @@ local Defaults = {
 	Visible = true,
 	Color = Color3.new(1, 1, 1),
 	MaxDistance = 5000,
-	Offset = Vector3.new(0, 2.5, 0),
+	Offset = Vector3.zero,
 	StudsOffset = nil,
 	TextSize = 14,
 	Font = nil,
@@ -455,7 +470,8 @@ local Defaults = {
 	TextStrokeTransparency = 0,
 	Billboard = true,
 	Highlight = true,
-	ESPType = "Highlight",
+	AvoidHighlightConflicts = true,
+	ESPType = "Box",
 	Thickness = 0.08,
 	Transparency = 0.65,
 	SurfaceColor = Color3.new(1, 1, 1),
@@ -537,6 +553,7 @@ local AllowedTracerFrom = {
 }
 
 local AllowedESPType = {
+	box = true,
 	text = true,
 	highlight = true,
 	selectionbox = true,
@@ -544,6 +561,17 @@ local AllowedESPType = {
 	boxadornment = true,
 	sphereadornment = true,
 	cylinderadornment = true,
+}
+
+local ESPTypeAliases = {
+	box = "adornment",
+	boxadornment = "adornment",
+	sphere = "sphereadornment",
+	cylinder = "cylinderadornment",
+	selection = "selectionbox",
+	selectionbox = "selectionbox",
+	highlight = "highlight",
+	text = "text",
 }
 
 local Box3DIndices = {
@@ -602,20 +630,21 @@ local VeloESP = {
 		Billboards = true,
 		Distance = true,
 		Highlighters = true,
+		ESPType = "Box",
 		Tracers = true,
 		Arrows = false,
 		EdgeBeacons = true,
 		Boxes2D = true,
 		Boxes3D = true,
 		Skeleton = false,
-		Font = Enum.Font.RobotoMono,
+		Font = Enum.Font.Oswald,
 		TextSize = 14,
 		UpdateRate = 0,
-		NearUpdateRate = 0,
-		FarUpdateRate = 0.12,
-		FarDistance = 650,
-		MaxPerFrame = 120,
-		FrameBudget = 1 / 300,
+		NearUpdateRate = 1 / 60,
+		FarUpdateRate = 0.18,
+		FarDistance = 450,
+		MaxPerFrame = 80,
+		FrameBudget = 1 / 600,
 		BudgetCheckInterval = 8,
 	},
 }
@@ -667,11 +696,15 @@ local function NormalizeOptions(Target, Options)
 		Final.Tracer.From = "bottom"
 	end
 
-	local Type = string.lower(tostring(Final.ESPType or "Highlight"))
+	local Type = string.lower(tostring(Final.ESPType or VeloESP.Settings.ESPType or "Box"))
 	if AllowedESPType[Type] then
-		Final.ESPType = Type
+		Final.ESPType = ESPTypeAliases[Type] or Type
 	else
-		Final.ESPType = "highlight"
+		Final.ESPType = "adornment"
+	end
+
+	if Final.AvoidHighlightConflicts ~= false and Final.ESPType == "highlight" and HasExternalHighlight(Final.Model) then
+		Final.ESPType = "adornment"
 	end
 
 	Final.MaxDistance = tonumber(Final.MaxDistance) or Defaults.MaxDistance
@@ -750,9 +783,44 @@ function ESP:_StepFade(TargetAlpha, DeltaTime)
 	return self._Alpha
 end
 
+function ESP:_GetPart(Target)
+	if self._PartTarget == Target and self._PartCache and self._PartCache.Parent then
+		return self._PartCache
+	end
+
+	local Part = GetPart(Target)
+	self._PartTarget = Target
+	self._PartCache = Part
+	return Part
+end
+
+function ESP:FadeOut()
+	if self.Destroyed then
+		return self
+	end
+
+	self.Hidden = false
+	self.CurrentSettings.Visible = false
+
+	if self.CurrentSettings.Fade.Enabled ~= true then
+		self:_HideAll()
+	end
+
+	return self
+end
+
+function ESP:FadeOutDestroy()
+	if self.Destroyed then
+		return self
+	end
+
+	self._DestroyAfterFade = true
+	return self:FadeOut()
+end
+
 function ESP:_CreateBillboard()
 	local Settings = self.CurrentSettings
-	local Adornee = GetPart(Settings.TextModel or Settings.Model)
+	local Adornee = self:_GetBillboardAdornee()
 
 	if Adornee == nil then
 		return
@@ -766,7 +834,7 @@ function ESP:_CreateBillboard()
 		LightInfluence = 0,
 		ResetOnSpawn = false,
 		Size = UDim2.fromOffset(260, 58),
-		StudsOffset = Settings.StudsOffset,
+		StudsOffset = Vector3.zero,
 		Enabled = false,
 	})
 
@@ -788,6 +856,45 @@ function ESP:_CreateBillboard()
 	self.UI.Label = Label
 end
 
+function ESP:_GetBillboardAdornee()
+	local Settings = self.CurrentSettings
+	local Target = Settings.TextModel or Settings.Model
+	local Part = self:_GetPart(Target)
+
+	if Part == nil then
+		return nil
+	end
+
+	local Anchor = self.UI.TextAnchor
+
+	if Anchor == nil or Anchor.Parent ~= Part then
+		Destroy(Anchor)
+
+		Anchor = New("Attachment", {
+			Parent = Part,
+			Name = "VeloESPTextAnchor",
+			Position = Vector3.zero,
+		})
+		self.UI.TextAnchor = Anchor
+	end
+
+	local AnchorPosition = Settings.StudsOffset or Vector3.zero
+	local BoundsCFrame = self._BoundsCFrame
+
+	if BoundsCFrame == nil or self._BoundsTarget ~= Target then
+		BoundsCFrame = GetBounds(Target)
+		self._BoundsCFrame = BoundsCFrame
+		self._BoundsTarget = Target
+	end
+
+	if BoundsCFrame then
+		AnchorPosition = Part.CFrame:PointToObjectSpace(BoundsCFrame.Position) + AnchorPosition
+	end
+
+	SetProperty(Anchor, "Position", AnchorPosition)
+	return Anchor
+end
+
 function ESP:_CreateHighlighter()
 	local Settings = self.CurrentSettings
 	local Type = Settings.ESPType
@@ -797,7 +904,7 @@ function ESP:_CreateHighlighter()
 	end
 
 	local Target = Settings.Model
-	local Part = GetPart(Target)
+	local Part = self:_GetPart(Target)
 	local _, Size = GetBounds(Target)
 	local Highlighter = nil
 
@@ -875,8 +982,18 @@ function ESP:_CreateHighlighter()
 	self.UI.Highlighter = Highlighter
 end
 
-function ESP:_CreateOverlay()
-	self.UI.Tracer = CreateLine(OverlayRoot, "Tracer")
+function ESP:_CreateTracer()
+	if self.UI.Tracer ~= nil then
+		return
+	end
+
+	self.UI.Tracer = CreateLine(OverlayRoot, "Tracer", true)
+end
+
+function ESP:_CreateEdgeBeacon()
+	if self.UI.EdgeBeacon ~= nil then
+		return
+	end
 
 	local EdgeBeacon = New("Frame", {
 		Parent = OverlayRoot,
@@ -932,7 +1049,7 @@ function ESP:_CreateOverlay()
 		Name = "Label",
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
-		Font = Enum.Font.RobotoMono,
+		Font = self.CurrentSettings.Font or VeloESP.Settings.Font,
 		Position = UDim2.fromOffset(0, 30),
 		Size = UDim2.fromOffset(132, 20),
 		Text = "",
@@ -948,6 +1065,12 @@ function ESP:_CreateOverlay()
 		Dot = BeaconDot,
 		Label = BeaconLabel,
 	}
+end
+
+function ESP:_CreateBox2D()
+	if self.UI.Box ~= nil then
+		return
+	end
 
 	local Box = New("Frame", {
 		Parent = OverlayRoot,
@@ -975,21 +1098,45 @@ function ESP:_CreateOverlay()
 		Right = CreateLine(Box, "Right"),
 	}
 
+	SetProperty(self.UI.BoxLines.Bottom, "AnchorPoint", Vector2.new(0, 1))
+	SetProperty(self.UI.BoxLines.Bottom, "Position", UDim2.new(0, 0, 1, 0))
+	SetProperty(self.UI.BoxLines.Right, "AnchorPoint", Vector2.new(1, 0))
+	SetProperty(self.UI.BoxLines.Right, "Position", UDim2.new(1, 0, 0, 0))
+end
+
+function ESP:_CreateBox3D()
+	if self.UI.Box3D ~= nil then
+		return
+	end
+
 	self.UI.Box3D = {}
 	for Index = 1, #Box3DIndices do
-		self.UI.Box3D[Index] = CreateLine(OverlayRoot, "Box3D_" .. tostring(Index))
+		self.UI.Box3D[Index] = CreateLine(OverlayRoot, "Box3D_" .. tostring(Index), true)
+	end
+end
+
+function ESP:_CreateSkeleton()
+	if self.UI.Skeleton ~= nil then
+		return
 	end
 
 	self.UI.Skeleton = {}
 	for Index = 1, #SkeletonSegments.R15 do
-		self.UI.Skeleton[Index] = CreateLine(OverlayRoot, "Bone_" .. tostring(Index))
+		self.UI.Skeleton[Index] = CreateLine(OverlayRoot, "Bone_" .. tostring(Index), true)
 	end
+end
+
+function ESP:_CreateOverlay()
+	self:_CreateTracer()
+	self:_CreateEdgeBeacon()
+	self:_CreateBox2D()
+	self:_CreateBox3D()
+	self:_CreateSkeleton()
 end
 
 function ESP:_Create()
 	self:_CreateBillboard()
 	self:_CreateHighlighter()
-	self:_CreateOverlay()
 end
 
 function ESP:_SetHighlighterVisible(Visible)
@@ -1057,8 +1204,8 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 		Text = string.format('%s\n<font size="11">[%d studs]</font>', Name, math.floor(Distance + 0.5))
 	end
 
-	SetProperty(Billboard, "Adornee", GetPart(Settings.TextModel or Settings.Model))
-	SetProperty(Billboard, "StudsOffset", Settings.StudsOffset)
+	SetProperty(Billboard, "Adornee", self:_GetBillboardAdornee())
+	SetProperty(Billboard, "StudsOffset", Vector3.zero)
 	SetProperty(Label, "Text", Text)
 	SetProperty(Label, "TextColor3", self:_GetColor(Settings.Color))
 	SetProperty(Label, "TextTransparency", ApplyAlphaTransparency(Settings.TextTransparency, Alpha))
@@ -1074,6 +1221,20 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 
 	if Highlighter == nil then
 		return
+	end
+
+	if Settings.AvoidHighlightConflicts ~= false and Settings.ESPType == "highlight" and HasExternalHighlight(Settings.Model) then
+		Settings.ESPType = "adornment"
+		Destroy(Highlighter)
+		self.UI.Highlighter = nil
+		self._HighlighterSize = nil
+		self._HighlighterSizeType = nil
+		self:_CreateHighlighter()
+		Highlighter = self.UI.Highlighter
+
+		if Highlighter == nil then
+			return
+		end
 	end
 
 	self:_SetHighlighterVisible(Enabled)
@@ -1098,8 +1259,16 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 		SetProperty(Highlighter, "SurfaceColor3", Settings.SurfaceColor)
 		SetProperty(Highlighter, "SurfaceTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
 	else
-		local Part = GetPart(Settings.Model)
-		local _, Size = GetBounds(Settings.Model)
+		local Part = self:_GetPart(Settings.Model)
+		local Size = self._HighlighterSize
+
+		if Size == nil or self._HighlighterSizeType ~= Type then
+			local _, NewSize = GetBounds(Settings.Model)
+			Size = NewSize
+			self._HighlighterSize = Size
+			self._HighlighterSizeType = Type
+		end
+
 		SetProperty(Highlighter, "Adornee", Part)
 		SetProperty(Highlighter, "Color3", Color)
 		SetProperty(Highlighter, "Transparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
@@ -1121,12 +1290,9 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box2D
 	local Box = self.UI.Box
-	if Box == nil then
-		return
-	end
 
 	if BoxSettings.Enabled ~= true or VeloESP.Settings.Boxes2D ~= true then
-		if Box.Visible then
+		if Box and Box.Visible then
 			SetProperty(Box, "Visible", false)
 		end
 
@@ -1134,6 +1300,15 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 	end
 
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and BoundsVisible
+
+	if Box == nil then
+		if Enabled then
+			self:_CreateBox2D()
+			Box = self.UI.Box
+		else
+			return
+		end
+	end
 
 	SetProperty(Box, "Visible", Enabled)
 
@@ -1155,15 +1330,9 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 	end
 
 	local Lines = self.UI.BoxLines
-	SetProperty(Lines.Top, "Position", UDim2.fromOffset(0, 0))
 	SetProperty(Lines.Top, "Size", UDim2.new(1, 0, 0, Thickness))
-	SetProperty(Lines.Bottom, "AnchorPoint", Vector2.new(0, 1))
-	SetProperty(Lines.Bottom, "Position", UDim2.new(0, 0, 1, 0))
 	SetProperty(Lines.Bottom, "Size", UDim2.new(1, 0, 0, Thickness))
-	SetProperty(Lines.Left, "Position", UDim2.fromOffset(0, 0))
 	SetProperty(Lines.Left, "Size", UDim2.new(0, Thickness, 1, 0))
-	SetProperty(Lines.Right, "AnchorPoint", Vector2.new(1, 0))
-	SetProperty(Lines.Right, "Position", UDim2.new(1, 0, 0, 0))
 	SetProperty(Lines.Right, "Size", UDim2.new(0, Thickness, 1, 0))
 
 	for _, Line in pairs(Lines) do
@@ -1177,6 +1346,7 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box3D
 	local Enabled = Visible and Alpha > 0.01 and CornerOnScreen and BoxSettings.Enabled == true and VeloESP.Settings.Boxes3D == true
+	local Lines = self.UI.Box3D
 
 	if not Enabled and self._Box3DVisible ~= true then
 		return
@@ -1185,16 +1355,23 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	self._Box3DVisible = Enabled
 
 	if not Enabled or ScreenCorners == nil then
-		for _, Line in ipairs(self.UI.Box3D) do
-			SetProperty(Line, "Visible", false)
+		if Lines then
+			for _, Line in ipairs(Lines) do
+				SetProperty(Line, "Visible", false)
+			end
 		end
 		return
+	end
+
+	if Lines == nil then
+		self:_CreateBox3D()
+		Lines = self.UI.Box3D
 	end
 
 	local Color = self:_GetColor(BoxSettings.Color)
 	local Transparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
 
-	for Index, Line in ipairs(self.UI.Box3D) do
+	for Index, Line in ipairs(Lines) do
 		local Pair = Box3DIndices[Index]
 		local PointA = Pair and ScreenCorners[Pair[1]]
 		local PointB = Pair and ScreenCorners[Pair[2]]
@@ -1207,8 +1384,10 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 			SetProperty(Line, "BackgroundTransparency", Transparency)
 			UpdateLine(
 				Line,
-				Vector2.new(PointA.X, PointA.Y),
-				Vector2.new(PointB.X, PointB.Y),
+				PointA.X,
+				PointA.Y,
+				PointB.X,
+				PointB.Y,
 				BoxSettings.Thickness
 			)
 		end
@@ -1219,22 +1398,22 @@ function ESP:_GetTracerOrigin()
 	local ActiveCamera = GetCamera()
 
 	if ActiveCamera == nil then
-		return Vector2.zero
+		return 0, 0
 	end
 
 	local Viewport = ActiveCamera.ViewportSize
 	local From = string.lower(tostring(self.CurrentSettings.Tracer.From or "bottom"))
 
 	if From == "top" then
-		return Vector2.new(Viewport.X / 2, 0)
+		return Viewport.X / 2, 0
 	elseif From == "center" then
-		return Vector2.new(Viewport.X / 2, Viewport.Y / 2)
+		return Viewport.X / 2, Viewport.Y / 2
 	elseif From == "mouse" then
 		local Mouse = UserInputService:GetMouseLocation()
-		return Vector2.new(Mouse.X, Mouse.Y)
+		return Mouse.X, Mouse.Y
 	end
 
-	return Vector2.new(Viewport.X / 2, Viewport.Y)
+	return Viewport.X / 2, Viewport.Y
 end
 
 function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
@@ -1243,7 +1422,12 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Enabled == true and VeloESP.Settings.Tracers == true
 
 	if Tracer == nil then
-		return
+		if Enabled then
+			self:_CreateTracer()
+			Tracer = self.UI.Tracer
+		else
+			return
+		end
 	end
 
 	SetProperty(Tracer, "Visible", Enabled)
@@ -1252,12 +1436,8 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 		return
 	end
 
-	UpdateLine(
-		Tracer,
-		self:_GetTracerOrigin(),
-		Vector2.new(ScreenPosition.X, ScreenPosition.Y),
-		Settings.Thickness
-	)
+	local OriginX, OriginY = self:_GetTracerOrigin()
+	UpdateLine(Tracer, OriginX, OriginY, ScreenPosition.X, ScreenPosition.Y, Settings.Thickness)
 
 	SetProperty(Tracer, "BackgroundColor3", self:_GetColor(Settings.Color))
 	SetProperty(Tracer, "BackgroundTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
@@ -1270,7 +1450,12 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	local Enabled = Visible and Alpha > 0.01 and not OnScreen and Settings.Enabled == true and GlobalEnabled
 
 	if Beacon == nil or Beacon.Root == nil then
-		return
+		if Enabled then
+			self:_CreateEdgeBeacon()
+			Beacon = self.UI.EdgeBeacon
+		else
+			return
+		end
 	end
 
 	SetProperty(Beacon.Root, "Visible", Enabled)
@@ -1353,6 +1538,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 
 	SetProperty(Beacon.Label, "Visible", Settings.Label == true)
 	SetProperty(Beacon.Label, "TextColor3", Color)
+	SetProperty(Beacon.Label, "Font", self.CurrentSettings.Font or VeloESP.Settings.Font)
 	SetProperty(Beacon.Label, "TextSize", Settings.TextSize)
 	SetProperty(Beacon.Label, "TextTransparency", ApplyAlphaTransparency(0, Alpha))
 	SetProperty(Beacon.Label, "TextStrokeTransparency", ApplyAlphaTransparency(0.45, Alpha))
@@ -1430,10 +1616,17 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 		self._SkeletonVisible = false
 
-		for _, Line in ipairs(Lines) do
-			SetProperty(Line, "Visible", false)
+		if Lines then
+			for _, Line in ipairs(Lines) do
+				SetProperty(Line, "Visible", false)
+			end
 		end
 		return
+	end
+
+	if Lines == nil then
+		self:_CreateSkeleton()
+		Lines = self.UI.Skeleton
 	end
 
 	self._SkeletonElapsed = (self._SkeletonElapsed or 0) + (DeltaTime or 1 / 60)
@@ -1478,8 +1671,10 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 			SetProperty(Line, "BackgroundTransparency", ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha))
 			UpdateLine(
 				Line,
-				Vector2.new(PointA.X, PointA.Y),
-				Vector2.new(PointB.X, PointB.Y),
+				PointA.X,
+				PointA.Y,
+				PointB.X,
+				PointB.Y,
 				SkeletonSettings.Thickness
 			)
 		end
@@ -1550,6 +1745,11 @@ function ESP:_Update(DeltaTime)
 	local Visible = Alpha > 0.01
 
 	if Visible ~= true then
+		if self._DestroyAfterFade == true then
+			self:Destroy()
+			return
+		end
+
 		self:_HideAll()
 		return
 	end
@@ -1594,10 +1794,27 @@ end
 function ESP:Set(Options)
 	assert(typeof(Options) == "table", "Argument #1 must be a table.")
 
+	local PreviousType = self.CurrentSettings.ESPType
+	local PreviousTextModel = self.CurrentSettings.TextModel
 	Merge(self.CurrentSettings, Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
 	self._SkeletonCache = nil
+
+	if PreviousTextModel ~= self.CurrentSettings.TextModel then
+		Destroy(self.UI.TextAnchor)
+		self.UI.TextAnchor = nil
+		self._BoundsCFrame = nil
+		self._BoundsTarget = nil
+	end
+
+	if PreviousType ~= self.CurrentSettings.ESPType then
+		Destroy(self.UI.Highlighter)
+		self.UI.Highlighter = nil
+		self._HighlighterSize = nil
+		self._HighlighterSizeType = nil
+		self:_CreateHighlighter()
+	end
 
 	return self
 end
@@ -2144,13 +2361,45 @@ function GeneratedObserver:_Flush()
 end
 
 function GeneratedObserver:_Scan()
-	if self.Options.IncludeRoot == true then
-		self:_Enqueue(self.Root)
-	end
+	self._ScanId = (self._ScanId or 0) + 1
+	local ScanId = self._ScanId
+	local BatchSize = math.max(25, tonumber(self.Options.ScanBatchSize) or 250)
 
-	for _, Object in ipairs(self.Root:GetDescendants()) do
-		self:_Enqueue(Object)
-	end
+	task.spawn(function()
+		local Stack = { self.Root }
+		local Head = 1
+		local Visited = 0
+
+		while self.Destroyed ~= true and self.Enabled == true and self._ScanId == ScanId do
+			local Object = Stack[Head]
+
+			if Object == nil then
+				break
+			end
+
+			Stack[Head] = nil
+			Head += 1
+
+			if Object == self.Root then
+				if self.Options.IncludeRoot == true then
+					self:_Enqueue(Object)
+				end
+			else
+				self:_Enqueue(Object)
+			end
+
+			for _, Child in ipairs(Object:GetChildren()) do
+				Stack[#Stack + 1] = Child
+			end
+
+			Visited += 1
+
+			if Visited >= BatchSize then
+				Visited = 0
+				task.wait()
+			end
+		end
+	end)
 end
 
 function GeneratedObserver:SetEnabled(Value)
@@ -2159,6 +2408,7 @@ function GeneratedObserver:SetEnabled(Value)
 	if self.Enabled then
 		self:_Scan()
 	else
+		self._ScanId = (self._ScanId or 0) + 1
 		table.clear(self.Queue)
 		self.QueueHead = 1
 		table.clear(self.Queued)
@@ -2186,6 +2436,7 @@ function GeneratedObserver:Destroy()
 	end
 
 	self.Destroyed = true
+	self._ScanId = (self._ScanId or 0) + 1
 
 	for _, Connection in ipairs(self.Connections) do
 		if Connection and Connection.Connected then
