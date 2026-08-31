@@ -2032,6 +2032,232 @@ function VeloESP.watch(RootObject, Rule)
 	return Object
 end
 
+local GeneratedObserver = {}
+GeneratedObserver.__index = GeneratedObserver
+
+function GeneratedObserver:_Matches(Object)
+	local Match = self.Options.Match
+
+	if Match == nil then
+		return true
+	end
+
+	if typeof(Match) == "string" then
+		return Object.Name == Match
+	elseif typeof(Match) == "table" then
+		if Match[Object.Name] ~= nil then
+			return Match[Object.Name] == true
+		end
+
+		return table.find(Match, Object.Name) ~= nil
+	elseif typeof(Match) == "function" then
+		local Success, Result = pcall(Match, Object)
+		return Success and Result == true
+	end
+
+	return false
+end
+
+function GeneratedObserver:_Enqueue(Object)
+	if self.Destroyed or self.Enabled ~= true then
+		return
+	end
+
+	if not (Object and Object.Parent) then
+		return
+	end
+
+	if self.Queued[Object] == true or not self:_Matches(Object) then
+		return
+	end
+
+	self.Queued[Object] = true
+	self.Queue[#self.Queue + 1] = Object
+end
+
+function GeneratedObserver:_ProcessObject(Object)
+	if self.Destroyed or self.Enabled ~= true then
+		return
+	end
+
+	if not (Object and Object.Parent) then
+		return
+	end
+
+	if not self:_Matches(Object) then
+		return
+	end
+
+	local Options = self.Options
+
+	if typeof(Options.OnAdded) == "function" then
+		SafeCall(Options.OnAdded, Object, self)
+	end
+
+	if typeof(Options.BuildOptions) == "function" then
+		local ESPOptions = SafeCall(Options.BuildOptions, Object, self)
+
+		if typeof(ESPOptions) == "table" then
+			ESPOptions.Model = ESPOptions.Model or ESPOptions.Object or Object
+			ESPOptions.Object = nil
+
+			if typeof(ESPOptions.Model) == "Instance" then
+				self.Handles[Object] = VeloESP.Add(ESPOptions)
+			end
+		end
+	elseif typeof(Options.ESP) == "table" then
+		local ESPOptions = DeepCopy(Options.ESP)
+		ESPOptions.Model = ESPOptions.Model or Object
+		ESPOptions.Name = Resolve(ESPOptions.Name, Object, ESPOptions.Name or Object.Name)
+		ESPOptions.Color = Resolve(ESPOptions.Color, Object, ESPOptions.Color)
+		self.Handles[Object] = VeloESP.Add(ESPOptions)
+	end
+end
+
+function GeneratedObserver:_Flush()
+	if self.Destroyed or self.Enabled ~= true then
+		return
+	end
+
+	local MaxPerStep = math.max(1, tonumber(self.Options.MaxPerStep) or 1)
+	local Processed = 0
+
+	while Processed < MaxPerStep do
+		local Head = self.QueueHead
+		local Object = self.Queue[Head]
+
+		if Object == nil then
+			if Head > 1 then
+				table.clear(self.Queue)
+				self.QueueHead = 1
+			end
+
+			break
+		end
+
+		self.Queue[Head] = nil
+		self.QueueHead = Head + 1
+		self.Queued[Object] = nil
+		self:_ProcessObject(Object)
+		Processed += 1
+	end
+end
+
+function GeneratedObserver:_Scan()
+	if self.Options.IncludeRoot == true then
+		self:_Enqueue(self.Root)
+	end
+
+	for _, Object in ipairs(self.Root:GetDescendants()) do
+		self:_Enqueue(Object)
+	end
+end
+
+function GeneratedObserver:SetEnabled(Value)
+	self.Enabled = Value == true
+
+	if self.Enabled then
+		self:_Scan()
+	else
+		table.clear(self.Queue)
+		self.QueueHead = 1
+		table.clear(self.Queued)
+
+		for Object, Handle in pairs(self.Handles) do
+			if Handle and Handle.Destroyed ~= true then
+				Handle:Destroy()
+			end
+
+			self.Handles[Object] = nil
+		end
+	end
+
+	return self
+end
+
+function GeneratedObserver:Refresh()
+	self:_Scan()
+	return self
+end
+
+function GeneratedObserver:Destroy()
+	if self.Destroyed then
+		return
+	end
+
+	self.Destroyed = true
+
+	for _, Connection in ipairs(self.Connections) do
+		if Connection and Connection.Connected then
+			Connection:Disconnect()
+		end
+	end
+
+	for _, Handle in pairs(self.Handles) do
+		if Handle and Handle.Destroyed ~= true then
+			Handle:Destroy()
+		end
+	end
+
+	table.clear(self.Connections)
+	table.clear(self.Queue)
+	self.QueueHead = 1
+	table.clear(self.Queued)
+	table.clear(self.Handles)
+end
+
+function GeneratedObserver:Disconnect()
+	self:Destroy()
+end
+
+function VeloESP.ObserveGenerated(RootObject, Options)
+	assert(VeloESP._Destroyed ~= true, "VeloESP is destroyed, please reload it.")
+	assert(typeof(RootObject) == "Instance", "Argument #1 must be an Instance.")
+	assert(typeof(Options) == "table", "Argument #2 must be a table.")
+
+	local Object = setmetatable({
+		Root = RootObject,
+		Options = Options,
+		Enabled = Options.Enabled ~= false,
+		Destroyed = false,
+		Queue = {},
+		QueueHead = 1,
+		Queued = setmetatable({}, { __mode = "k" }),
+		Handles = setmetatable({}, { __mode = "k" }),
+		Connections = {},
+	}, GeneratedObserver)
+
+	table.insert(Object.Connections, RootObject.DescendantAdded:Connect(function(Descendant)
+		Object:_Enqueue(Descendant)
+	end))
+
+	table.insert(Object.Connections, RootObject.DescendantRemoving:Connect(function(Descendant)
+		Object.Queued[Descendant] = nil
+
+		local Handle = Object.Handles[Descendant]
+
+		if Handle and Handle.Destroyed ~= true then
+			Handle:Destroy()
+		end
+
+		Object.Handles[Descendant] = nil
+	end))
+
+	table.insert(Object.Connections, RunService.RenderStepped:Connect(function()
+		Object:_Flush()
+	end))
+
+	if Object.Enabled then
+		Object:_Scan()
+	end
+
+	table.insert(VeloESP._Watchers, Object)
+	return Object
+end
+
+VeloESP.Observe = VeloESP.ObserveGenerated
+VeloESP.WatchGenerated = VeloESP.ObserveGenerated
+
 function VeloESP.WatchPlayers(Options)
 	local PlayerSettings = DeepCopy(Options or {})
 	local Handles = {}

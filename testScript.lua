@@ -280,6 +280,18 @@ local function BuildESPAdapter()
     end
     function Adapter:SetDistanceSizeRatio() end
 
+    function Adapter:ObserveGenerated(RootObject, Options)
+        return VeloESP.ObserveGenerated(RootObject, Options)
+    end
+
+    function Adapter:Observe(RootObject, Options)
+        return VeloESP.ObserveGenerated(RootObject, Options)
+    end
+
+    function Adapter:WatchGenerated(RootObject, Options)
+        return VeloESP.ObserveGenerated(RootObject, Options)
+    end
+
     function Adapter:Unload()
         pcall(function() VeloESP.Destroy() end)
     end
@@ -7219,7 +7231,6 @@ Connections.PromptAnimationFixer1 = Services.ProximityPromptService.PromptButton
 	end
 end)
 
-Globals.ObjectQueue = {}
 local AllowedInstances = {
 	Lava=true, GoldPile=true, KeyObtain=true, Drakobloxxer=true, FuseObtain=true,
 	MinesGenerator=true, JeffTheKiller=true, Snare=true, FakeDoor=true, DoorFake=true, SideroomSpace=true,
@@ -7244,28 +7255,18 @@ local AllowedInstances = {
 	BrokenMonitor=true, DinkyLamp=true, GweenSodaPack=true, TV_Stand=true
 }
 
-Functions.QueueObject = function(Object)
-	if not AllowedInstances[Object.Name] and Object.ClassName ~= "ProximityPrompt" and Object.Parent ~= CurrentRooms and not ItemNames[Object.Name] then
-		return
-	end
-	table.insert(Globals.ObjectQueue, Object)
-end
-
-Globals.QueueDone = true
-Connections.QueueConnection = Services.RunService.RenderStepped:Connect(function()
-	local Object = table.remove(Globals.ObjectQueue, 1)
-	if Object then
+Connections.GeneratedObjectObserver = Ostium.ESPLibrary:ObserveGenerated(Services.Workspace, {
+	MaxPerStep = 1,
+	Match = function(Object)
+		return AllowedInstances[Object.Name]
+			or Object.ClassName == "ProximityPrompt"
+			or Object.Parent == CurrentRooms
+			or ItemNames[Object.Name] ~= nil
+	end,
+	OnAdded = function(Object)
 		Functions.HandleObject(Object)
-	end
-end)
-
-for _, Object in Services.Workspace:GetDescendants() do
-	task.spawn(function() Functions.QueueObject(Object) end)
-end
-
-Connections.InstanceHandler = Services.Workspace.DescendantAdded:Connect(function(Object)
-	Functions.QueueObject(Object)
-end)
+	end,
+})
 
 for _, Player in Services.Players:GetPlayers() do
 	if Player ~= LocalPlayer then
