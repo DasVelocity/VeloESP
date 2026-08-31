@@ -238,7 +238,15 @@ local function GetCFrame(Target)
 	end
 
 	if Target:IsA("Model") then
-		return Target:GetPivot()
+		local Success, Pivot = pcall(function()
+			return Target:GetPivot()
+		end)
+
+		if Success then
+			return Pivot
+		end
+
+		return nil
 	end
 
 	if Target:IsA("BasePart") then
@@ -389,6 +397,32 @@ local function GetModelCorners(Target, ScreenCorners)
 	end
 
 	return OnScreen, nil, ScreenCorners, MinX, MinY, MaxX, MaxY
+end
+
+local function GetProjectedVisibility(Target, ScreenCorners, ResolvedCFrame)
+	local CFrame = ResolvedCFrame or GetCFrame(Target)
+
+	if CFrame == nil then
+		return nil, false, false, ScreenCorners, 0, 0, 0, 0
+	end
+
+	local ScreenPosition, OnScreen = WorldToViewport(CFrame.Position)
+	local BoundsVisible = OnScreen
+	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
+
+	local ShouldCheckBounds = not OnScreen and (
+		Target:IsA("Model")
+		or Target:IsA("BasePart")
+		or Target:IsA("Attachment")
+	)
+
+	if ShouldCheckBounds then
+		local CornerVisible
+		CornerVisible, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Target, ScreenCorners)
+		BoundsVisible = CornerVisible == true
+	end
+
+	return CFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY
 end
 
 local function CreateLine(Parent, Name)
@@ -1074,6 +1108,26 @@ function ESP:_CreateHighlighter()
 	self.UI.Highlighter = Highlighter
 end
 
+local function HighlighterMatchesType(Highlighter, Type)
+	if Highlighter == nil then
+		return false
+	end
+
+	if Type == "highlight" then
+		return Highlighter:IsA("Highlight")
+	elseif Type == "selectionbox" then
+		return Highlighter:IsA("SelectionBox")
+	elseif Type == "sphereadornment" then
+		return Highlighter:IsA("SphereHandleAdornment")
+	elseif Type == "cylinderadornment" then
+		return Highlighter:IsA("CylinderHandleAdornment")
+	elseif string.find(Type, "adornment") then
+		return Highlighter:IsA("BoxHandleAdornment")
+	end
+
+	return true
+end
+
 function ESP:_CreateOverlay()
 	self.UI.Tracer = CreateLine(OverlayRoot, "Tracer")
 
@@ -1266,7 +1320,7 @@ function ESP:_HideAll()
 	self:_RefreshSmoothOverlayRegistration()
 end
 
-function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
+function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 	local Settings = self.CurrentSettings
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
@@ -1284,7 +1338,7 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 		Label = self.UI.Label
 	end
 
-	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
+	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
 
 	if Billboard == nil or Label == nil then
 		return
@@ -1319,9 +1373,17 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 	SetProperty(Label, "TextSize", Settings.TextSize or VeloESP.Settings.TextSize)
 end
 
-function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
+function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
 	local Settings = self.CurrentSettings
 	local Highlighter = self.UI.Highlighter
+	local Type = Settings.ESPType
+
+	if Highlighter and not HighlighterMatchesType(Highlighter, Type) then
+		self:_SetHighlighterVisible(false)
+		Destroy(Highlighter)
+		self.UI.Highlighter = nil
+		Highlighter = nil
+	end
 
 	-- Adornment ESP types need a BasePart. If the model was still being built
 	-- when Add() ran, retry until the rig has a usable part.
@@ -1334,7 +1396,7 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 		Highlighter = self.UI.Highlighter
 	end
 
-	local Enabled = Visible and OnScreen and Alpha > 0.01 and VeloESP.Settings.Highlighters == true
+	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and VeloESP.Settings.Highlighters == true
 
 	if Highlighter == nil then
 		return
@@ -1346,7 +1408,6 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 		return
 	end
 
-	local Type = Settings.ESPType
 	local Color = self:_GetColor(Settings.Color)
 
 	if Highlighter:IsA("Highlight") then
@@ -1381,7 +1442,7 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 	end
 end
 
-function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, MaxX, MaxY)
+function ESP:_UpdateBox2D(Visible, TargetOnScreen, Alpha, BoundsVisible, MinX, MinY, MaxX, MaxY)
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box2D
 	local Box = self.UI.Box
@@ -1397,7 +1458,7 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 		return
 	end
 
-	local Enabled = Visible and OnScreen and Alpha > 0.01 and BoundsVisible
+	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and BoundsVisible
 
 	SetProperty(Box, "Visible", Enabled)
 
@@ -2006,8 +2067,9 @@ function ESP:_Update(DeltaTime)
 	end
 
 	local CFrame = GetCFrame(Settings.Model)
+	local ProjectedCFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY = GetProjectedVisibility(Settings.Model, self._ScreenCorners, CFrame)
 
-	if CFrame == nil then
+	if ProjectedCFrame == nil or ScreenPosition == nil then
 		self:_HideAll()
 		return
 	end
@@ -2016,7 +2078,7 @@ function ESP:_Update(DeltaTime)
 	local Distance = math.huge
 
 	if ActiveCamera then
-		Distance = (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+		Distance = (ProjectedCFrame.Position - ActiveCamera.CFrame.Position).Magnitude
 	end
 
 	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
@@ -2043,36 +2105,33 @@ function ESP:_Update(DeltaTime)
 		return
 	end
 
-	local ScreenPosition, OnScreen = WorldToViewport(CFrame.Position)
 	local NeedsCorners = OnScreen
 		and (
 			(Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
 			or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
 		)
-	local CornerOnScreen = false
-	local ScreenCorners = nil
-	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
+	local CornerOnScreen = BoundsVisible
 
 	if NeedsCorners then
-		ScreenCorners = self._ScreenCorners
 		CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model, ScreenCorners)
 	end
 
 	self._LastDistance = Distance
 	self._LastScreenPosition = ScreenPosition
 	self._OnScreen = OnScreen
+	self._BoundsVisible = BoundsVisible
 	self._Alpha = Alpha
 
 	if Settings.BeforeUpdate then
 		SafeCall(Settings.BeforeUpdate, self)
 	end
 
-	self:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
-	self:_UpdateHighlighter(Visible, OnScreen, Alpha)
-	self:_UpdateBox2D(Visible, OnScreen, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
+	self:_UpdateBillboard(Visible, BoundsVisible, Distance, Alpha)
+	self:_UpdateHighlighter(Visible, BoundsVisible, Alpha)
+	self:_UpdateBox2D(Visible, BoundsVisible, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
 	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
-	self:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
+	self:_UpdateEdgeBeacon(Visible, BoundsVisible, ScreenPosition, Distance, Alpha)
 	self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 	if Settings.AfterUpdate then
