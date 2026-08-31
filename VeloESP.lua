@@ -52,8 +52,12 @@ local function New(ClassName, Properties)
 	return Object
 end
 
+local PropertyCache = setmetatable({}, { __mode = "k" })
+
 local function Destroy(Object)
 	if Object ~= nil then
+		PropertyCache[Object] = nil
+
 		pcall(function()
 			Object:Destroy()
 		end)
@@ -124,6 +128,26 @@ local function ClampNumber(Value, Min, Max, Fallback)
 	return math.clamp(Value, Min, Max)
 end
 
+local function SetProperty(Object, Property, Value)
+	if Object == nil then
+		return
+	end
+
+	local Cache = PropertyCache[Object]
+
+	if Cache == nil then
+		Cache = {}
+		PropertyCache[Object] = Cache
+	end
+
+	if Cache[Property] == Value then
+		return
+	end
+
+	Cache[Property] = Value
+	Object[Property] = Value
+end
+
 local function Approach(Current, Target, Step)
 	if Current < Target then
 		return math.min(Current + Step, Target)
@@ -135,8 +159,20 @@ local function Approach(Current, Target, Step)
 end
 
 local function ApplyAlphaTransparency(BaseTransparency, Alpha)
-	BaseTransparency = ClampNumber(BaseTransparency, 0, 1, 0)
-	Alpha = ClampNumber(Alpha, 0, 1, 1)
+	BaseTransparency = tonumber(BaseTransparency) or 0
+	Alpha = tonumber(Alpha) or 1
+
+	if BaseTransparency < 0 then
+		BaseTransparency = 0
+	elseif BaseTransparency > 1 then
+		BaseTransparency = 1
+	end
+
+	if Alpha < 0 then
+		Alpha = 0
+	elseif Alpha > 1 then
+		Alpha = 1
+	end
 
 	return 1 - ((1 - BaseTransparency) * Alpha)
 end
@@ -268,38 +304,46 @@ local function UpdateLine(Frame, PointA, PointB, Thickness)
 	local Delta = PointB - PointA
 	local Center = PointA + Delta / 2
 
-	Frame.AnchorPoint = Vector2.new(0.5, 0.5)
-	Frame.Position = UDim2.fromOffset(Center.X, Center.Y)
-	Frame.Size = UDim2.fromOffset(math.max(1, Delta.Magnitude), math.max(1, Thickness))
-	Frame.Rotation = math.deg(math.atan2(Delta.Y, Delta.X))
+	SetProperty(Frame, "AnchorPoint", Vector2.new(0.5, 0.5))
+	SetProperty(Frame, "Position", UDim2.fromOffset(Center.X, Center.Y))
+	SetProperty(Frame, "Size", UDim2.fromOffset(math.max(1, Delta.Magnitude), math.max(1, Thickness)))
+	SetProperty(Frame, "Rotation", math.deg(math.atan2(Delta.Y, Delta.X)))
 end
 
-local function GetModelCorners(Target)
+local ModelCornerSigns = {
+	{ 1, 1, 1 },
+	{ 1, 1, -1 },
+	{ 1, -1, 1 },
+	{ 1, -1, -1 },
+	{ -1, 1, 1 },
+	{ -1, 1, -1 },
+	{ -1, -1, 1 },
+	{ -1, -1, -1 },
+}
+
+local function GetModelCorners(Target, ScreenCorners)
 	local CFrame, Size = GetBounds(Target)
 
 	if not (CFrame and Size) then
-		return false, {}, {}, 0, 0, 0, 0
+		return false, nil, ScreenCorners or {}, 0, 0, 0, 0
 	end
 
-	local X, Y, Z = Size.X / 2, Size.Y / 2, Size.Z / 2
-	local WorldCorners = {
-		CFrame * Vector3.new(X, Y, Z),
-		CFrame * Vector3.new(X, Y, -Z),
-		CFrame * Vector3.new(X, -Y, Z),
-		CFrame * Vector3.new(X, -Y, -Z),
-		CFrame * Vector3.new(-X, Y, Z),
-		CFrame * Vector3.new(-X, Y, -Z),
-		CFrame * Vector3.new(-X, -Y, Z),
-		CFrame * Vector3.new(-X, -Y, -Z),
-	}
+	local ActiveCamera = GetCamera()
 
-	local ScreenCorners = {}
+	if ActiveCamera == nil then
+		return false, nil, ScreenCorners or {}, 0, 0, 0, 0
+	end
+
+	ScreenCorners = ScreenCorners or {}
+
 	local OnScreen = false
 	local MinX, MinY = math.huge, math.huge
 	local MaxX, MaxY = -math.huge, -math.huge
+	local X, Y, Z = Size.X / 2, Size.Y / 2, Size.Z / 2
 
-	for Index, Corner in ipairs(WorldCorners) do
-		local ScreenPoint, Visible = WorldToViewport(Corner)
+	for Index = 1, 8 do
+		local Sign = ModelCornerSigns[Index]
+		local ScreenPoint, Visible = ActiveCamera:WorldToViewportPoint(CFrame * Vector3.new(X * Sign[1], Y * Sign[2], Z * Sign[3]))
 		ScreenCorners[Index] = ScreenPoint
 
 		if ScreenPoint.Z > 0 then
@@ -312,10 +356,10 @@ local function GetModelCorners(Target)
 	end
 
 	if MinX == math.huge then
-		return false, WorldCorners, ScreenCorners, 0, 0, 0, 0
+		return false, nil, ScreenCorners, 0, 0, 0, 0
 	end
 
-	return OnScreen, WorldCorners, ScreenCorners, MinX, MinY, MaxX, MaxY
+	return OnScreen, nil, ScreenCorners, MinX, MinY, MaxX, MaxY
 end
 
 local function CreateLine(Parent, Name)
@@ -570,7 +614,9 @@ local VeloESP = {
 		NearUpdateRate = 0,
 		FarUpdateRate = 0.12,
 		FarDistance = 650,
-		MaxPerFrame = math.huge,
+		MaxPerFrame = 120,
+		FrameBudget = 1 / 300,
+		BudgetCheckInterval = 8,
 	},
 }
 
@@ -657,11 +703,7 @@ end
 
 function ESP:_GetColor(Base)
 	if VeloESP.Settings.Rainbow then
-		return Color3.fromHSV(
-			(os.clock() * VeloESP.Settings.RainbowSpeed) % 1,
-			VeloESP.Settings.RainbowSaturation,
-			VeloESP.Settings.RainbowValue
-		)
+		return VeloESP._RainbowColor or Base or self.CurrentSettings.Color
 	end
 
 	return Base or self.CurrentSettings.Color
@@ -958,37 +1000,37 @@ function ESP:_SetHighlighterVisible(Visible)
 	end
 
 	if Highlighter:IsA("Highlight") then
-		Highlighter.Enabled = Visible
+		SetProperty(Highlighter, "Enabled", Visible)
 	else
-		Highlighter.Visible = Visible
+		SetProperty(Highlighter, "Visible", Visible)
 	end
 end
 
 function ESP:_HideAll()
 	if self.UI.Billboard then
-		self.UI.Billboard.Enabled = false
+		SetProperty(self.UI.Billboard, "Enabled", false)
 	end
 
 	self:_SetHighlighterVisible(false)
 
 	if self.UI.Tracer then
-		self.UI.Tracer.Visible = false
+		SetProperty(self.UI.Tracer, "Visible", false)
 	end
 
 	if self.UI.EdgeBeacon and self.UI.EdgeBeacon.Root then
-		self.UI.EdgeBeacon.Root.Visible = false
+		SetProperty(self.UI.EdgeBeacon.Root, "Visible", false)
 	end
 
 	if self.UI.Box then
-		self.UI.Box.Visible = false
+		SetProperty(self.UI.Box, "Visible", false)
 	end
 
 	for _, Line in pairs(self.UI.Box3D or {}) do
-		Line.Visible = false
+		SetProperty(Line, "Visible", false)
 	end
 
 	for _, Line in pairs(self.UI.Skeleton or {}) do
-		Line.Visible = false
+		SetProperty(Line, "Visible", false)
 	end
 end
 
@@ -1002,7 +1044,7 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 		return
 	end
 
-	Billboard.Enabled = Enabled
+	SetProperty(Billboard, "Enabled", Enabled)
 
 	if not Enabled then
 		return
@@ -1015,14 +1057,14 @@ function ESP:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 		Text = string.format('%s\n<font size="11">[%d studs]</font>', Name, math.floor(Distance + 0.5))
 	end
 
-	Billboard.Adornee = GetPart(Settings.TextModel or Settings.Model)
-	Billboard.StudsOffset = Settings.StudsOffset
-	Label.Text = Text
-	Label.TextColor3 = self:_GetColor(Settings.Color)
-	Label.TextTransparency = ApplyAlphaTransparency(Settings.TextTransparency, Alpha)
-	Label.TextStrokeTransparency = ApplyAlphaTransparency(Settings.TextStrokeTransparency, Alpha)
-	Label.Font = Settings.Font or VeloESP.Settings.Font
-	Label.TextSize = Settings.TextSize or VeloESP.Settings.TextSize
+	SetProperty(Billboard, "Adornee", GetPart(Settings.TextModel or Settings.Model))
+	SetProperty(Billboard, "StudsOffset", Settings.StudsOffset)
+	SetProperty(Label, "Text", Text)
+	SetProperty(Label, "TextColor3", self:_GetColor(Settings.Color))
+	SetProperty(Label, "TextTransparency", ApplyAlphaTransparency(Settings.TextTransparency, Alpha))
+	SetProperty(Label, "TextStrokeTransparency", ApplyAlphaTransparency(Settings.TextStrokeTransparency, Alpha))
+	SetProperty(Label, "Font", Settings.Font or VeloESP.Settings.Font)
+	SetProperty(Label, "TextSize", Settings.TextSize or VeloESP.Settings.TextSize)
 end
 
 function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
@@ -1044,32 +1086,32 @@ function ESP:_UpdateHighlighter(Visible, OnScreen, Alpha)
 	local Color = self:_GetColor(Settings.Color)
 
 	if Highlighter:IsA("Highlight") then
-		Highlighter.Adornee = Settings.Model
-		Highlighter.FillColor = self:_GetColor(Settings.FillColor)
-		Highlighter.OutlineColor = self:_GetColor(Settings.OutlineColor)
-		Highlighter.FillTransparency = ApplyAlphaTransparency(Settings.FillTransparency, Alpha)
-		Highlighter.OutlineTransparency = ApplyAlphaTransparency(Settings.OutlineTransparency, Alpha)
+		SetProperty(Highlighter, "Adornee", Settings.Model)
+		SetProperty(Highlighter, "FillColor", self:_GetColor(Settings.FillColor))
+		SetProperty(Highlighter, "OutlineColor", self:_GetColor(Settings.OutlineColor))
+		SetProperty(Highlighter, "FillTransparency", ApplyAlphaTransparency(Settings.FillTransparency, Alpha))
+		SetProperty(Highlighter, "OutlineTransparency", ApplyAlphaTransparency(Settings.OutlineTransparency, Alpha))
 	elseif Highlighter:IsA("SelectionBox") then
-		Highlighter.Adornee = Settings.Model
-		Highlighter.Color3 = Color
-		Highlighter.LineThickness = Settings.Thickness
-		Highlighter.SurfaceColor3 = Settings.SurfaceColor
-		Highlighter.SurfaceTransparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
+		SetProperty(Highlighter, "Adornee", Settings.Model)
+		SetProperty(Highlighter, "Color3", Color)
+		SetProperty(Highlighter, "LineThickness", Settings.Thickness)
+		SetProperty(Highlighter, "SurfaceColor3", Settings.SurfaceColor)
+		SetProperty(Highlighter, "SurfaceTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
 	else
 		local Part = GetPart(Settings.Model)
 		local _, Size = GetBounds(Settings.Model)
-		Highlighter.Adornee = Part
-		Highlighter.Color3 = Color
-		Highlighter.Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
+		SetProperty(Highlighter, "Adornee", Part)
+		SetProperty(Highlighter, "Color3", Color)
+		SetProperty(Highlighter, "Transparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
 
 		if Size then
 			if Type == "sphereadornment" then
-				Highlighter.Radius = math.max(Size.X, Size.Y, Size.Z) * 0.62
+				SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Y, Size.Z) * 0.62)
 			elseif Type == "cylinderadornment" then
-				Highlighter.Height = Size.Y
-				Highlighter.Radius = math.max(Size.X, Size.Z) * 0.55
+				SetProperty(Highlighter, "Height", Size.Y)
+				SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Z) * 0.55)
 			elseif Highlighter:IsA("BoxHandleAdornment") then
-				Highlighter.Size = Size
+				SetProperty(Highlighter, "Size", Size)
 			end
 		end
 	end
@@ -1085,7 +1127,7 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 
 	if BoxSettings.Enabled ~= true or VeloESP.Settings.Boxes2D ~= true then
 		if Box.Visible then
-			Box.Visible = false
+			SetProperty(Box, "Visible", false)
 		end
 
 		return
@@ -1093,7 +1135,7 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and BoundsVisible
 
-	Box.Visible = Enabled
+	SetProperty(Box, "Visible", Enabled)
 
 	if not Enabled then
 		return
@@ -1102,32 +1144,32 @@ function ESP:_UpdateBox2D(Visible, OnScreen, Alpha, BoundsVisible, MinX, MinY, M
 	local Thickness = math.max(1, tonumber(BoxSettings.Thickness) or 1)
 	local Color = self:_GetColor(BoxSettings.Color)
 
-	Box.Position = UDim2.fromOffset(MinX, MinY)
-	Box.Size = UDim2.fromOffset(math.max(1, MaxX - MinX), math.max(1, MaxY - MinY))
-	self.UI.BoxFill.BackgroundColor3 = Color
+	SetProperty(Box, "Position", UDim2.fromOffset(MinX, MinY))
+	SetProperty(Box, "Size", UDim2.fromOffset(math.max(1, MaxX - MinX), math.max(1, MaxY - MinY)))
+	SetProperty(self.UI.BoxFill, "BackgroundColor3", Color)
 
 	if BoxSettings.Filled then
-		self.UI.BoxFill.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.FillTransparency, Alpha)
+		SetProperty(self.UI.BoxFill, "BackgroundTransparency", ApplyAlphaTransparency(BoxSettings.FillTransparency, Alpha))
 	else
-		self.UI.BoxFill.BackgroundTransparency = 1
+		SetProperty(self.UI.BoxFill, "BackgroundTransparency", 1)
 	end
 
 	local Lines = self.UI.BoxLines
-	Lines.Top.Position = UDim2.fromOffset(0, 0)
-	Lines.Top.Size = UDim2.new(1, 0, 0, Thickness)
-	Lines.Bottom.AnchorPoint = Vector2.new(0, 1)
-	Lines.Bottom.Position = UDim2.new(0, 0, 1, 0)
-	Lines.Bottom.Size = UDim2.new(1, 0, 0, Thickness)
-	Lines.Left.Position = UDim2.fromOffset(0, 0)
-	Lines.Left.Size = UDim2.new(0, Thickness, 1, 0)
-	Lines.Right.AnchorPoint = Vector2.new(1, 0)
-	Lines.Right.Position = UDim2.new(1, 0, 0, 0)
-	Lines.Right.Size = UDim2.new(0, Thickness, 1, 0)
+	SetProperty(Lines.Top, "Position", UDim2.fromOffset(0, 0))
+	SetProperty(Lines.Top, "Size", UDim2.new(1, 0, 0, Thickness))
+	SetProperty(Lines.Bottom, "AnchorPoint", Vector2.new(0, 1))
+	SetProperty(Lines.Bottom, "Position", UDim2.new(0, 0, 1, 0))
+	SetProperty(Lines.Bottom, "Size", UDim2.new(1, 0, 0, Thickness))
+	SetProperty(Lines.Left, "Position", UDim2.fromOffset(0, 0))
+	SetProperty(Lines.Left, "Size", UDim2.new(0, Thickness, 1, 0))
+	SetProperty(Lines.Right, "AnchorPoint", Vector2.new(1, 0))
+	SetProperty(Lines.Right, "Position", UDim2.new(1, 0, 0, 0))
+	SetProperty(Lines.Right, "Size", UDim2.new(0, Thickness, 1, 0))
 
 	for _, Line in pairs(Lines) do
-		Line.Visible = true
-		Line.BackgroundColor3 = Color
-		Line.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
+		SetProperty(Line, "Visible", true)
+		SetProperty(Line, "BackgroundColor3", Color)
+		SetProperty(Line, "BackgroundTransparency", ApplyAlphaTransparency(BoxSettings.Transparency, Alpha))
 	end
 end
 
@@ -1142,17 +1184,27 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 
 	self._Box3DVisible = Enabled
 
+	if not Enabled or ScreenCorners == nil then
+		for _, Line in ipairs(self.UI.Box3D) do
+			SetProperty(Line, "Visible", false)
+		end
+		return
+	end
+
+	local Color = self:_GetColor(BoxSettings.Color)
+	local Transparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
+
 	for Index, Line in ipairs(self.UI.Box3D) do
 		local Pair = Box3DIndices[Index]
 		local PointA = Pair and ScreenCorners[Pair[1]]
 		local PointB = Pair and ScreenCorners[Pair[2]]
 		local ShowLine = Enabled and PointA and PointB and PointA.Z > 0 and PointB.Z > 0
 
-		Line.Visible = ShowLine == true
+		SetProperty(Line, "Visible", ShowLine == true)
 
 		if ShowLine then
-			Line.BackgroundColor3 = self:_GetColor(BoxSettings.Color)
-			Line.BackgroundTransparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
+			SetProperty(Line, "BackgroundColor3", Color)
+			SetProperty(Line, "BackgroundTransparency", Transparency)
 			UpdateLine(
 				Line,
 				Vector2.new(PointA.X, PointA.Y),
@@ -1194,7 +1246,7 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 		return
 	end
 
-	Tracer.Visible = Enabled
+	SetProperty(Tracer, "Visible", Enabled)
 
 	if not Enabled then
 		return
@@ -1207,8 +1259,8 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 		Settings.Thickness
 	)
 
-	Tracer.BackgroundColor3 = self:_GetColor(Settings.Color)
-	Tracer.BackgroundTransparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
+	SetProperty(Tracer, "BackgroundColor3", self:_GetColor(Settings.Color))
+	SetProperty(Tracer, "BackgroundTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
 end
 
 function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
@@ -1221,7 +1273,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		return
 	end
 
-	Beacon.Root.Visible = Enabled
+	SetProperty(Beacon.Root, "Visible", Enabled)
 
 	if not Enabled then
 		return
@@ -1269,49 +1321,49 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	local Length = Settings.Length
 	local Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
 
-	Beacon.Root.Position = UDim2.fromOffset(Position.X, Position.Y)
-	Beacon.Stem.Size = UDim2.fromOffset(Length, Thickness)
+	SetProperty(Beacon.Root, "Position", UDim2.fromOffset(Position.X, Position.Y))
+	SetProperty(Beacon.Stem, "Size", UDim2.fromOffset(Length, Thickness))
 	if VerticalEdge then
-		Beacon.Stem.Rotation = 90
+		SetProperty(Beacon.Stem, "Rotation", 90)
 	else
-		Beacon.Stem.Rotation = 0
+		SetProperty(Beacon.Stem, "Rotation", 0)
 	end
-	Beacon.Stem.BackgroundColor3 = Color
-	Beacon.Stem.BackgroundTransparency = math.clamp(Transparency + 0.18, 0, 1)
+	SetProperty(Beacon.Stem, "BackgroundColor3", Color)
+	SetProperty(Beacon.Stem, "BackgroundTransparency", math.clamp(Transparency + 0.18, 0, 1))
 
-	Beacon.Dot.Size = UDim2.fromOffset(DotSize, DotSize)
-	Beacon.Dot.BackgroundColor3 = Color
-	Beacon.Dot.BackgroundTransparency = Transparency
+	SetProperty(Beacon.Dot, "Size", UDim2.fromOffset(DotSize, DotSize))
+	SetProperty(Beacon.Dot, "BackgroundColor3", Color)
+	SetProperty(Beacon.Dot, "BackgroundTransparency", Transparency)
 
 	if Settings.Pulse == true and Settings.PulseSpeed > 0 then
 		local Phase = ((os.clock() * Settings.PulseSpeed) + (self._Seed or 0)) % 1
 		local PulseSize = DotSize + (DotSize * 2 * Phase)
 
-		Beacon.Pulse.Visible = true
-		Beacon.Pulse.Size = UDim2.fromOffset(PulseSize, PulseSize)
-		Beacon.Pulse.BackgroundColor3 = Color
-		Beacon.Pulse.BackgroundTransparency = math.clamp(
+		SetProperty(Beacon.Pulse, "Visible", true)
+		SetProperty(Beacon.Pulse, "Size", UDim2.fromOffset(PulseSize, PulseSize))
+		SetProperty(Beacon.Pulse, "BackgroundColor3", Color)
+		SetProperty(Beacon.Pulse, "BackgroundTransparency", math.clamp(
 			ApplyAlphaTransparency(Settings.PulseTransparency, Alpha) + (Phase * 0.16),
 			0,
 			1
-		)
+		))
 	else
-		Beacon.Pulse.Visible = false
+		SetProperty(Beacon.Pulse, "Visible", false)
 	end
 
-	Beacon.Label.Visible = Settings.Label == true
-	Beacon.Label.TextColor3 = Color
-	Beacon.Label.TextSize = Settings.TextSize
-	Beacon.Label.TextTransparency = ApplyAlphaTransparency(0, Alpha)
-	Beacon.Label.TextStrokeTransparency = ApplyAlphaTransparency(0.45, Alpha)
+	SetProperty(Beacon.Label, "Visible", Settings.Label == true)
+	SetProperty(Beacon.Label, "TextColor3", Color)
+	SetProperty(Beacon.Label, "TextSize", Settings.TextSize)
+	SetProperty(Beacon.Label, "TextTransparency", ApplyAlphaTransparency(0, Alpha))
+	SetProperty(Beacon.Label, "TextStrokeTransparency", ApplyAlphaTransparency(0.45, Alpha))
 
 	if Settings.Label == true then
 		local Name = tostring(self.CurrentSettings.Name or self.Target.Name)
 
 		if Settings.Distance == true then
-			Beacon.Label.Text = string.format("%s  %dst", Name, math.floor(Distance + 0.5))
+			SetProperty(Beacon.Label, "Text", string.format("%s  %dst", Name, math.floor(Distance + 0.5)))
 		else
-			Beacon.Label.Text = Name
+			SetProperty(Beacon.Label, "Text", Name)
 		end
 	end
 end
@@ -1379,7 +1431,7 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 		self._SkeletonVisible = false
 
 		for _, Line in ipairs(Lines) do
-			Line.Visible = false
+			SetProperty(Line, "Visible", false)
 		end
 		return
 	end
@@ -1403,14 +1455,14 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 		local Segment = Cache.Segments[Index]
 
 		if Segment == nil then
-			Line.Visible = false
+			SetProperty(Line, "Visible", false)
 			continue
 		end
 
 		local Parts = Cache.Parts[Index]
 
 		if Parts == nil or Parts[1].Parent == nil or Parts[2].Parent == nil then
-			Line.Visible = false
+			SetProperty(Line, "Visible", false)
 			continue
 		end
 
@@ -1419,11 +1471,11 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 		local PointA = WorldToViewport(First.Position)
 		local PointB = WorldToViewport(Second.Position)
 		local ShowLine = PointA.Z > 0 and PointB.Z > 0
-		Line.Visible = ShowLine
+		SetProperty(Line, "Visible", ShowLine)
 
 		if ShowLine then
-			Line.BackgroundColor3 = self:_GetColor(SkeletonSettings.Color)
-			Line.BackgroundTransparency = ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha)
+			SetProperty(Line, "BackgroundColor3", self:_GetColor(SkeletonSettings.Color))
+			SetProperty(Line, "BackgroundTransparency", ApplyAlphaTransparency(SkeletonSettings.Transparency, Alpha))
 			UpdateLine(
 				Line,
 				Vector2.new(PointA.X, PointA.Y),
@@ -1513,7 +1565,8 @@ function ESP:_Update(DeltaTime)
 	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
 
 	if NeedsCorners then
-		CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model)
+		ScreenCorners = self._ScreenCorners
+		CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model, ScreenCorners)
 	end
 
 	self._LastDistance = Distance
@@ -1528,7 +1581,7 @@ function ESP:_Update(DeltaTime)
 	self:_UpdateBillboard(Visible, OnScreen, Distance, Alpha)
 	self:_UpdateHighlighter(Visible, OnScreen, Alpha)
 	self:_UpdateBox2D(Visible, OnScreen, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
-	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners or {})
+	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	self:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
 	self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
@@ -1668,6 +1721,7 @@ function VeloESP.new(Target, Options)
 		_Alpha = StartAlpha,
 		_Seed = math.random(),
 		_UpdateElapsed = 0,
+		_ScreenCorners = table.create(8),
 		OriginalSettings = DeepCopy(Settings),
 		CurrentSettings = Settings,
 		Options = Settings,
@@ -2131,7 +2185,19 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 		return
 	end
 
+	if VeloESP.Settings.Rainbow then
+		VeloESP._RainbowColor = Color3.fromHSV(
+			(os.clock() * VeloESP.Settings.RainbowSpeed) % 1,
+			VeloESP.Settings.RainbowSaturation,
+			VeloESP.Settings.RainbowValue
+		)
+	end
+
 	local MaxPerFrame = tonumber(VeloESP.Settings.MaxPerFrame) or math.huge
+	local FrameBudget = tonumber(VeloESP.Settings.FrameBudget) or 0
+	local BudgetCheckInterval = math.max(1, tonumber(VeloESP.Settings.BudgetCheckInterval) or 8)
+	local FrameStarted = FrameBudget > 0 and os.clock() or 0
+	local BudgetCounter = 0
 	local Updated = 0
 	local Visited = 0
 	local Index = VeloESP._UpdateCursor or 1
@@ -2145,8 +2211,14 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 		Visited += 1
 
 		if Object == nil or Object.Destroyed == true then
-			table.remove(ObjectList, Index)
+			local Last = ObjectList[Count]
+			ObjectList[Index] = Last
+			ObjectList[Count] = nil
 			Count -= 1
+
+			if Last and Last ~= Object then
+				Last._ListIndex = Index
+			end
 
 			if Count == 0 then
 				Index = 1
@@ -2166,6 +2238,18 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 
 			if Updated >= MaxPerFrame then
 				break
+			end
+
+			if FrameBudget > 0 then
+				BudgetCounter += 1
+
+				if BudgetCounter >= BudgetCheckInterval then
+					BudgetCounter = 0
+
+					if os.clock() - FrameStarted >= FrameBudget then
+						break
+					end
+				end
 			end
 		end
 	end
