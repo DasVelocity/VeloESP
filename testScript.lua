@@ -65,9 +65,10 @@ end
 
 SetLoadingStep(1, "Loading ESP library", "Downloading the VeloESP renderer...")
 
-local VeloESP = loadstring(game:HttpGet(VELOESP_URL .. "?cachebust=" .. tostring(os.time())))()
+OstiumEnv.VeloESP = loadstring(game:HttpGet(VELOESP_URL .. "?cachebust=" .. tostring(os.time())))()
 
-local function BuildESPAdapter()
+OstiumEnv.BuildESPAdapter = function()
+    local VeloESP = OstiumEnv.VeloESP
     local Adapter = {}
     Adapter.ColorTable = setmetatable({}, { __mode = "k" })
 
@@ -342,7 +343,7 @@ local Ostium = {
         isnetworkowner = isnetworkowner,
         require = require,
     },
-    ESPLibrary = BuildESPAdapter(),
+    ESPLibrary = OstiumEnv.BuildESPAdapter(),
     Internal = {
         Library = ObsidianLibrary,
         SaveManager = ObsidianSaveManager,
@@ -588,7 +589,8 @@ function Ostium.Internal.RenderConfigPane(Window)
         Values = { "50%", "75%", "100%", "125%", "150%", "175%", "200%" },
         Default = "100%",
         Callback = function(Value)
-            local Scale = tonumber((Value or "100%"):gsub("%%", ""))
+            local Percent = tostring(Value or "100%"):gsub("%%", "")
+            local Scale = tonumber(Percent)
             if Scale and ObsidianLibrary.SetDPIScale then ObsidianLibrary:SetDPIScale(Scale) end
         end,
     })
