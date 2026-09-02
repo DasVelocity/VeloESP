@@ -16,6 +16,7 @@ local Players = cloneref(game:GetService("Players"))
 local RunService = cloneref(game:GetService("RunService"))
 local UserInputService = cloneref(game:GetService("UserInputService"))
 local CoreGui = cloneref(game:GetService("CoreGui"))
+local TextService = cloneref(game:GetService("TextService"))
 local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -501,6 +502,102 @@ local HiddenRoot = New("Folder", {
 	Name = "VeloESPStorage",
 })
 
+local Path2DSupported = false
+
+do
+	local Success, Probe = pcall(Instance.new, "Path2D")
+
+	if Success and Probe then
+		Path2DSupported = Path2DControlPoint ~= nil
+		Destroy(Probe)
+	end
+end
+
+local TracerPointCache = setmetatable({}, { __mode = "k" })
+
+local function CreateTracerLine(Parent, Name)
+	if Path2DSupported then
+		return New("Path2D", {
+			Parent = Parent,
+			Name = Name,
+			Closed = false,
+			Color3 = Color3.new(1, 1, 1),
+			Thickness = 2,
+			Visible = false,
+		})
+	end
+
+	return CreateLine(Parent, Name)
+end
+
+local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transparency)
+	if Line == nil then
+		return
+	end
+
+	if Path2DSupported and Line:IsA("Path2D") then
+		local Cache = TracerPointCache[Line]
+
+		if Cache == nil then
+			Cache = {}
+			TracerPointCache[Line] = Cache
+		end
+
+		if Cache.AX ~= PointA.X or Cache.AY ~= PointA.Y or Cache.BX ~= PointB.X or Cache.BY ~= PointB.Y then
+			Cache.AX, Cache.AY, Cache.BX, Cache.BY = PointA.X, PointA.Y, PointB.X, PointB.Y
+			Line:SetControlPoints({
+				Path2DControlPoint.new(UDim2.fromOffset(PointA.X, PointA.Y)),
+				Path2DControlPoint.new(UDim2.fromOffset(PointB.X, PointB.Y)),
+			})
+		end
+
+		SetProperty(Line, "Thickness", math.max(1, Thickness))
+		SetProperty(Line, "Color3", Color)
+
+		if CoreGuiAllowed then
+			SetProperty(Line, "Transparency", Transparency)
+		end
+
+		return
+	end
+
+	UpdateLine(Line, PointA, PointB, Thickness)
+	SetProperty(Line, "BackgroundColor3", Color)
+	SetProperty(Line, "BackgroundTransparency", Transparency)
+end
+
+local TextMeasureBounds = Vector2.new(4096, 4096)
+local TextMeasureCache = {}
+local TextMeasureCount = 0
+
+local function MeasureText(Text, TextSize, Font)
+	local Key = Text .. "|" .. tostring(TextSize) .. "|" .. tostring(Font)
+	local Cached = TextMeasureCache[Key]
+
+	if Cached ~= nil then
+		return Cached
+	end
+
+	local Success, Result = pcall(function()
+		return TextService:GetTextSize(Text, TextSize, Font, TextMeasureBounds)
+	end)
+
+	if not (Success and typeof(Result) == "Vector2") then
+		local Characters = utf8.len(Text) or #Text
+		Result = Vector2.new(Characters * TextSize * 0.54, TextSize)
+	end
+
+	if TextMeasureCount >= 512 then
+		table.clear(TextMeasureCache)
+		TextMeasureCount = 0
+	end
+
+	TextMeasureCache[Key] = Result
+	TextMeasureCount += 1
+
+	return Result
+end
+
 -- Roblox does not expose a render-priority property for Highlight objects.
 -- Keep VeloESP highlights authoritative by temporarily suppressing overlapping
 -- game highlights and restoring their intended Enabled state afterward.
@@ -706,7 +803,7 @@ local Defaults = {
 		Label = true,
 		Distance = true,
 		TextSize = 13,
-		Font = Enum.Font.GothamMedium,
+		Font = Enum.Font.Oswald,
 		Transparency = 0,
 		PulseTransparency = 0.72,
 	},
@@ -1133,7 +1230,7 @@ local function HighlighterMatchesType(Highlighter, Type)
 end
 
 function ESP:_CreateOverlay()
-	self.UI.Tracer = CreateLine(OverlayRoot, "Tracer")
+	self.UI.Tracer = CreateTracerLine(OverlayRoot, "Tracer")
 
 	local EdgeBeacon = New("Frame", {
 		Parent = OverlayRoot,
@@ -1194,6 +1291,7 @@ function ESP:_CreateOverlay()
 		TextStrokeTransparency = 0.35,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		TextXAlignment = Enum.TextXAlignment.Center,
+		TextYAlignment = Enum.TextYAlignment.Center,
 		ZIndex = 5,
 	})
 
@@ -1573,7 +1671,7 @@ function ESP:_RefreshSmoothOverlayRegistration()
 	local Active = false
 	local TracerState = self._TracerState
 
-	if TracerState and TracerState.Visible == true and (tonumber(TracerState.Smoothness) or 0) > 0 then
+	if TracerState and TracerState.Visible == true then
 		Active = true
 	end
 
@@ -1614,7 +1712,8 @@ function ESP:_RenderTracer(DeltaTime)
 				State.TargetTo = Vector2.new(ScreenPosition.X, ScreenPosition.Y)
 			else
 				SetProperty(Tracer, "Visible", false)
-				return false
+				State.CurrentTo = nil
+				return true
 			end
 		end
 	end
@@ -1623,9 +1722,7 @@ function ESP:_RenderTracer(DeltaTime)
 	State.CurrentTo = SmoothVector2(State.CurrentTo, State.TargetTo, State.Smoothness, DeltaTime)
 
 	SetProperty(Tracer, "Visible", true)
-	UpdateLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness)
-	SetProperty(Tracer, "BackgroundColor3", State.Color)
-	SetProperty(Tracer, "BackgroundTransparency", State.Transparency)
+	UpdateTracerLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness, State.Color, State.Transparency)
 
 	return true
 end
@@ -1671,7 +1768,7 @@ function ESP:_PresentOverlays(DeltaTime)
 	local Active = false
 	local TracerState = self._TracerState
 
-	if TracerState and TracerState.Visible == true and (tonumber(TracerState.Smoothness) or 0) > 0 then
+	if TracerState and TracerState.Visible == true then
 		Active = self:_RenderTracer(DeltaTime) or Active
 	end
 
@@ -1786,6 +1883,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	end
 
 	local Position = Center + Direction * math.min(ScaleX, ScaleY)
+	Position = Vector2.new(math.floor(Position.X + 0.5), math.floor(Position.Y + 0.5))
 	local Color = self:_GetColor(Settings.Color)
 	local Thickness = math.clamp(Settings.Thickness, 1, 4)
 	local Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
@@ -1802,18 +1900,22 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		LabelText = string.format("%s  ·  %d studs", Name, math.floor(Distance + 0.5))
 	end
 
-	local LabelHeight = math.max(20, Settings.TextSize + 6)
-	local LabelCharacters = utf8.len(LabelText) or #LabelText
-	local LabelWidth = math.clamp((LabelCharacters * Settings.TextSize * 0.54) + 8, 60, 190)
-	LabelWidth = math.min(LabelWidth, math.max(1, Viewport.X - 8))
-	LabelHeight = math.min(LabelHeight, math.max(1, Viewport.Y - 8))
-	local LabelGap = (ArrowSize / 2) + (LabelWidth / 2) + 4
+	local LabelFont = Settings.Font or VeloESP.Settings.Font or Enum.Font.Oswald
+	local TextBounds = MeasureText(LabelText, Settings.TextSize, LabelFont)
+	local LabelWidth = math.clamp(math.ceil(TextBounds.X) + 8, 24, math.max(24, math.min(260, Viewport.X - 8)))
+	local LabelHeight = math.min(math.ceil(TextBounds.Y) + 2, math.max(1, Viewport.Y - 8))
+	local Axis
+	local LabelGap
 
-	if math.abs(Direction.Y) > math.abs(Direction.X) then
-		LabelGap = (ArrowSize / 2) + (LabelHeight / 2) + 4
+	if math.abs(Direction.X) >= math.abs(Direction.Y) then
+		Axis = Vector2.new(Direction.X >= 0 and 1 or -1, 0)
+		LabelGap = (ArrowSize / 2) + (LabelWidth / 2) + 6
+	else
+		Axis = Vector2.new(0, Direction.Y >= 0 and 1 or -1)
+		LabelGap = (ArrowSize / 2) + (LabelHeight / 2) + 6
 	end
 
-	local DesiredLabelCenter = Position - (Direction * LabelGap)
+	local DesiredLabelCenter = Position - (Axis * LabelGap)
 	local LabelHalfWidth = LabelWidth / 2
 	local LabelHalfHeight = LabelHeight / 2
 	local SafeInset = 4
@@ -1822,6 +1924,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		math.clamp(DesiredLabelCenter.Y, LabelHalfHeight + SafeInset, Viewport.Y - LabelHalfHeight - SafeInset)
 	)
 	local LabelOffset = LabelCenter - Position
+	LabelOffset = Vector2.new(math.floor(LabelOffset.X + 0.5), math.floor(LabelOffset.Y + 0.5))
 
 	SetProperty(Beacon.Root, "Position", UDim2.fromOffset(Position.X, Position.Y))
 	SetProperty(Beacon.Indicator, "Size", UDim2.fromOffset(ArrowSize, ArrowSize))
@@ -1837,7 +1940,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	SetProperty(Beacon.Label, "Position", UDim2.fromOffset(LabelOffset.X, LabelOffset.Y))
 	SetProperty(Beacon.Label, "Size", UDim2.fromOffset(LabelWidth, LabelHeight))
 	SetProperty(Beacon.Label, "TextColor3", Color)
-	SetProperty(Beacon.Label, "Font", Settings.Font or Enum.Font.GothamMedium)
+	SetProperty(Beacon.Label, "Font", LabelFont)
 	SetProperty(Beacon.Label, "TextSize", Settings.TextSize)
 	SetProperty(Beacon.Label, "TextTransparency", Transparency)
 	SetProperty(Beacon.Label, "TextStrokeTransparency", ApplyAlphaTransparency(0.35, Alpha))
