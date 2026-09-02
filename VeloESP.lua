@@ -1408,6 +1408,10 @@ function ESP:_SetHighlighterVisible(Visible)
 end
 
 function ESP:_HideAll()
+	if self._AllHidden == true then
+		return
+	end
+
 	if self.UI.Billboard then
 		SetProperty(self.UI.Billboard, "Enabled", false)
 	end
@@ -1454,6 +1458,7 @@ function ESP:_HideAll()
 	end
 
 	self._SkeletonVisible = false
+	self._AllHidden = true
 	self:_RefreshSmoothOverlayRegistration()
 end
 
@@ -2188,19 +2193,28 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 end
 
 function ESP:_GetUpdateRate(Distance)
-	local GlobalRate = tonumber(VeloESP.Settings.UpdateRate) or 0
+	local Cache = VeloESP._RateCache
+	local GlobalRate, FarDistance, FarRate, NearRate
+
+	if Cache then
+		GlobalRate, FarDistance, FarRate, NearRate = Cache[1], Cache[2], Cache[3], Cache[4]
+	else
+		local Settings = VeloESP.Settings
+		GlobalRate = tonumber(Settings.UpdateRate) or 0
+		FarDistance = tonumber(Settings.FarDistance) or 650
+		FarRate = tonumber(Settings.FarUpdateRate) or 0
+		NearRate = tonumber(Settings.NearUpdateRate) or 0
+	end
 
 	if GlobalRate > 0 then
 		return GlobalRate
 	end
 
-	local FarDistance = tonumber(VeloESP.Settings.FarDistance) or 650
-
 	if Distance and Distance >= FarDistance then
-		return tonumber(VeloESP.Settings.FarUpdateRate) or 0
+		return FarRate
 	end
 
-	return tonumber(VeloESP.Settings.NearUpdateRate) or 0
+	return NearRate
 end
 
 function ESP:_Update(DeltaTime)
@@ -2218,9 +2232,8 @@ function ESP:_Update(DeltaTime)
 	end
 
 	local CFrame = GetCFrame(Settings.Model)
-	local ProjectedCFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY = GetProjectedVisibility(Settings.Model, self._ScreenCorners, CFrame)
 
-	if ProjectedCFrame == nil or ScreenPosition == nil then
+	if CFrame == nil then
 		self:_HideAll()
 		return
 	end
@@ -2229,7 +2242,7 @@ function ESP:_Update(DeltaTime)
 	local Distance = math.huge
 
 	if ActiveCamera then
-		Distance = (ProjectedCFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+		Distance = (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
 	end
 
 	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
@@ -2256,6 +2269,13 @@ function ESP:_Update(DeltaTime)
 		return
 	end
 
+	local ProjectedCFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY = GetProjectedVisibility(Settings.Model, self._ScreenCorners, CFrame)
+
+	if ProjectedCFrame == nil or ScreenPosition == nil then
+		self:_HideAll()
+		return
+	end
+
 	local NeedsCorners = OnScreen
 		and (
 			(Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
@@ -2276,6 +2296,8 @@ function ESP:_Update(DeltaTime)
 	if Settings.BeforeUpdate then
 		SafeCall(Settings.BeforeUpdate, self)
 	end
+
+	self._AllHidden = false
 
 	self:_UpdateBillboard(Visible, BoundsVisible, Distance, Alpha)
 	self:_UpdateHighlighter(Visible, BoundsVisible, Alpha)
@@ -3226,9 +3248,22 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 		)
 	end
 
-	local MaxPerFrame = tonumber(VeloESP.Settings.MaxPerFrame) or math.huge
-	local FrameBudget = tonumber(VeloESP.Settings.FrameBudget) or 0
-	local BudgetCheckInterval = math.max(1, tonumber(VeloESP.Settings.BudgetCheckInterval) or 8)
+	local Settings = VeloESP.Settings
+	local RateCache = VeloESP._RateCache
+
+	if RateCache == nil then
+		RateCache = table.create(4)
+		VeloESP._RateCache = RateCache
+	end
+
+	RateCache[1] = tonumber(Settings.UpdateRate) or 0
+	RateCache[2] = tonumber(Settings.FarDistance) or 650
+	RateCache[3] = tonumber(Settings.FarUpdateRate) or 0
+	RateCache[4] = tonumber(Settings.NearUpdateRate) or 0
+
+	local MaxPerFrame = tonumber(Settings.MaxPerFrame) or math.huge
+	local FrameBudget = tonumber(Settings.FrameBudget) or 0
+	local BudgetCheckInterval = math.max(1, tonumber(Settings.BudgetCheckInterval) or 8)
 	local FrameStarted = FrameBudget > 0 and os.clock() or 0
 	local BudgetCounter = 0
 	local Updated = 0
