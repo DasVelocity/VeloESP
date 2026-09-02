@@ -501,6 +501,9 @@ local HiddenRoot = New("Folder", {
 	Name = "VeloESPStorage",
 })
 
+-- Roblox does not expose a render-priority property for Highlight objects.
+-- Keep VeloESP highlights authoritative by temporarily suppressing overlapping
+-- game highlights and restoring their intended Enabled state afterward.
 local HighlightRegistry = setmetatable({}, { __mode = "k" })
 local ActiveHighlightESPs = setmetatable({}, { __mode = "k" })
 
@@ -695,14 +698,14 @@ local Defaults = {
 		Enabled = false,
 		Color = Color3.new(1, 1, 1),
 		Margin = 28,
-		Length = 34,
+		Length = 38,
 		Thickness = 2,
 		DotSize = 5,
-		Pulse = true,
+		Pulse = false,
 		PulseSpeed = 1.25,
 		Label = true,
 		Distance = true,
-		TextSize = 12,
+		TextSize = 13,
 		Font = Enum.Font.GothamMedium,
 		Transparency = 0,
 		PulseTransparency = 0.72,
@@ -1142,50 +1145,6 @@ function ESP:_CreateOverlay()
 		Visible = false,
 	})
 
-	local BeaconPulse = New("Frame", {
-		Parent = EdgeBeacon,
-		Name = "Pulse",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Position = UDim2.fromOffset(0, 0),
-		ZIndex = 1,
-	})
-	New("UICorner", {
-		Parent = BeaconPulse,
-		CornerRadius = UDim.new(1, 0),
-	})
-	local BeaconPulseStroke = New("UIStroke", {
-		Parent = BeaconPulse,
-		Name = "PulseStroke",
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Color = self.CurrentSettings.Color,
-		Thickness = 1.5,
-		Transparency = 1,
-	})
-
-	local BeaconBackdrop = New("Frame", {
-		Parent = EdgeBeacon,
-		Name = "Backdrop",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundColor3 = Color3.fromRGB(10, 13, 18),
-		BackgroundTransparency = 0.12,
-		BorderSizePixel = 0,
-		Position = UDim2.fromOffset(0, 0),
-		ZIndex = 2,
-	})
-	New("UICorner", {
-		Parent = BeaconBackdrop,
-		CornerRadius = UDim.new(1, 0),
-	})
-	local BeaconBackdropStroke = New("UIStroke", {
-		Parent = BeaconBackdrop,
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Color = self.CurrentSettings.Color,
-		Thickness = 1,
-		Transparency = 0.5,
-	})
-
 	local BeaconIndicator = New("Frame", {
 		Parent = EdgeBeacon,
 		Name = "Indicator",
@@ -1219,86 +1178,30 @@ function ESP:_CreateOverlay()
 		Parent = BeaconChevronBottom,
 		CornerRadius = UDim.new(1, 0),
 	})
-	local BeaconDot = New("Frame", {
-		Parent = BeaconIndicator,
-		Name = "Core",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundColor3 = self.CurrentSettings.Color,
-		BorderSizePixel = 0,
-		ZIndex = 3,
-	})
-	New("UICorner", {
-		Parent = BeaconDot,
-		CornerRadius = UDim.new(1, 0),
-	})
-
-	local BeaconLabelPanel = New("Frame", {
-		Parent = EdgeBeacon,
-		Name = "LabelPanel",
-		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundColor3 = Color3.fromRGB(10, 13, 18),
-		BackgroundTransparency = 0.16,
-		BorderSizePixel = 0,
-		Position = UDim2.fromOffset(0, 44),
-		Size = UDim2.fromOffset(132, 26),
-		Visible = false,
-		ZIndex = 4,
-	})
-	New("UICorner", {
-		Parent = BeaconLabelPanel,
-		CornerRadius = UDim.new(0, 7),
-	})
-	local BeaconLabelStroke = New("UIStroke", {
-		Parent = BeaconLabelPanel,
-		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
-		Color = Color3.fromRGB(255, 255, 255),
-		Thickness = 1,
-		Transparency = 0.84,
-	})
-	local BeaconAccent = New("Frame", {
-		Parent = BeaconLabelPanel,
-		Name = "Accent",
-		AnchorPoint = Vector2.new(0, 0.5),
-		BackgroundColor3 = self.CurrentSettings.Color,
-		BorderSizePixel = 0,
-		Position = UDim2.new(0, 7, 0.5, 0),
-		Size = UDim2.fromOffset(3, 12),
-		ZIndex = 5,
-	})
-	New("UICorner", {
-		Parent = BeaconAccent,
-		CornerRadius = UDim.new(1, 0),
-	})
 
 	local BeaconLabel = New("TextLabel", {
-		Parent = BeaconLabelPanel,
+		Parent = EdgeBeacon,
 		Name = "Label",
+		AnchorPoint = Vector2.new(0.5, 0.5),
 		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		Font = self.CurrentSettings.EdgeBeacon.Font,
-		Position = UDim2.fromOffset(16, 0),
-		Size = UDim2.new(1, -24, 1, 0),
+		Position = UDim2.fromOffset(44, 0),
+		Size = UDim2.fromOffset(140, 24),
 		Text = "",
-		TextColor3 = Color3.fromRGB(242, 246, 255),
-		TextStrokeTransparency = 1,
+		TextColor3 = self.CurrentSettings.Color,
+		TextStrokeColor3 = Color3.new(0, 0, 0),
+		TextStrokeTransparency = 0.35,
 		TextTruncate = Enum.TextTruncate.AtEnd,
-		TextXAlignment = Enum.TextXAlignment.Left,
+		TextXAlignment = Enum.TextXAlignment.Center,
 		ZIndex = 5,
 	})
 
 	self.UI.EdgeBeacon = {
 		Root = EdgeBeacon,
-		Pulse = BeaconPulse,
-		PulseStroke = BeaconPulseStroke,
-		Backdrop = BeaconBackdrop,
-		BackdropStroke = BeaconBackdropStroke,
 		Indicator = BeaconIndicator,
 		ChevronTop = BeaconChevronTop,
 		ChevronBottom = BeaconChevronBottom,
-		Dot = BeaconDot,
-		LabelPanel = BeaconLabelPanel,
-		LabelStroke = BeaconLabelStroke,
-		Accent = BeaconAccent,
 		Label = BeaconLabel,
 	}
 
@@ -1424,6 +1327,10 @@ function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 	local Settings = self.CurrentSettings
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
+
+	-- Freshly generated rigs are often parented before any BasePart exists.
+	-- Retry creation until an adornee becomes available instead of permanently
+	-- losing the text ESP because the first creation attempt happened too early.
 	if (Billboard == nil or Label == nil)
 		and Settings.Text == true
 		and Settings.Billboard ~= false
@@ -1481,6 +1388,8 @@ function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
 		Highlighter = nil
 	end
 
+	-- Adornment ESP types need a BasePart. If the model was still being built
+	-- when Add() ran, retry until the rig has a usable part.
 	if Highlighter == nil
 		and Settings.Highlight ~= false
 		and Settings.ESPType ~= "text"
@@ -1861,8 +1770,8 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		Direction = Direction.Unit
 	end
 
-	local IconSize = math.clamp(Settings.Length, 28, 42)
-	local Margin = Settings.Margin + (IconSize / 2) + 4
+	local ArrowSize = math.clamp(Settings.Length, 24, 48)
+	local Margin = Settings.Margin + (ArrowSize / 2)
 	local BoundsX = math.max(8, (Viewport.X / 2) - Margin)
 	local BoundsY = math.max(8, (Viewport.Y / 2) - Margin)
 	local ScaleX = math.huge
@@ -1878,16 +1787,13 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 
 	local Position = Center + Direction * math.min(ScaleX, ScaleY)
 	local Color = self:_GetColor(Settings.Color)
-	local DotSize = math.clamp(Settings.DotSize, 3, 8)
 	local Thickness = math.clamp(Settings.Thickness, 1, 4)
 	local Transparency = ApplyAlphaTransparency(Settings.Transparency, Alpha)
-	local IndicatorInset = IconSize * 0.25
-	local IndicatorSize = IconSize - (IndicatorInset * 2)
-	local BaseX = IndicatorSize * 0.28
-	local TipX = IndicatorSize * 0.72
-	local TopY = IndicatorSize * 0.24
-	local MiddleY = IndicatorSize * 0.5
-	local BottomY = IndicatorSize * 0.76
+	local BaseX = ArrowSize * 0.16
+	local TipX = ArrowSize * 0.84
+	local TopY = ArrowSize * 0.08
+	local MiddleY = ArrowSize * 0.5
+	local BottomY = ArrowSize * 0.92
 	local Name = tostring(self.CurrentSettings.Name or self.Target.Name)
 	local LabelText = Name
 	local ShowDistance = Settings.Distance == true and VeloESP.Settings.Distance == true
@@ -1896,16 +1802,21 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		LabelText = string.format("%s  ·  %d studs", Name, math.floor(Distance + 0.5))
 	end
 
-	local LabelHeight = math.max(24, Settings.TextSize + 12)
+	local LabelHeight = math.max(20, Settings.TextSize + 6)
 	local LabelCharacters = utf8.len(LabelText) or #LabelText
-	local LabelWidth = math.clamp((LabelCharacters * Settings.TextSize * 0.54) + 34, 92, 188)
-	LabelWidth = math.min(LabelWidth, math.max(1, Viewport.X - 16))
-	LabelHeight = math.min(LabelHeight, math.max(1, Viewport.Y - 16))
-	local LabelGap = (IconSize / 2) + (LabelHeight / 2) + 8
+	local LabelWidth = math.clamp((LabelCharacters * Settings.TextSize * 0.54) + 8, 60, 190)
+	LabelWidth = math.min(LabelWidth, math.max(1, Viewport.X - 8))
+	LabelHeight = math.min(LabelHeight, math.max(1, Viewport.Y - 8))
+	local LabelGap = (ArrowSize / 2) + (LabelWidth / 2) + 4
+
+	if math.abs(Direction.Y) > math.abs(Direction.X) then
+		LabelGap = (ArrowSize / 2) + (LabelHeight / 2) + 4
+	end
+
 	local DesiredLabelCenter = Position - (Direction * LabelGap)
 	local LabelHalfWidth = LabelWidth / 2
 	local LabelHalfHeight = LabelHeight / 2
-	local SafeInset = 8
+	local SafeInset = 4
 	local LabelCenter = Vector2.new(
 		math.clamp(DesiredLabelCenter.X, LabelHalfWidth + SafeInset, Viewport.X - LabelHalfWidth - SafeInset),
 		math.clamp(DesiredLabelCenter.Y, LabelHalfHeight + SafeInset, Viewport.Y - LabelHalfHeight - SafeInset)
@@ -1913,12 +1824,7 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	local LabelOffset = LabelCenter - Position
 
 	SetProperty(Beacon.Root, "Position", UDim2.fromOffset(Position.X, Position.Y))
-	SetProperty(Beacon.Backdrop, "Size", UDim2.fromOffset(IconSize, IconSize))
-	SetProperty(Beacon.Backdrop, "BackgroundTransparency", ApplyAlphaTransparency(0.12, Alpha))
-	SetProperty(Beacon.BackdropStroke, "Color", Color)
-	SetProperty(Beacon.BackdropStroke, "Transparency", ApplyAlphaTransparency(0.52, Alpha))
-
-	SetProperty(Beacon.Indicator, "Size", UDim2.fromOffset(IndicatorSize, IndicatorSize))
+	SetProperty(Beacon.Indicator, "Size", UDim2.fromOffset(ArrowSize, ArrowSize))
 	SetProperty(Beacon.Indicator, "Rotation", math.deg(math.atan2(Direction.Y, Direction.X)))
 	UpdateLine(Beacon.ChevronTop, Vector2.new(BaseX, TopY), Vector2.new(TipX, MiddleY), Thickness)
 	UpdateLine(Beacon.ChevronBottom, Vector2.new(TipX, MiddleY), Vector2.new(BaseX, BottomY), Thickness)
@@ -1927,34 +1833,14 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	SetProperty(Beacon.ChevronBottom, "BackgroundColor3", Color)
 	SetProperty(Beacon.ChevronBottom, "BackgroundTransparency", Transparency)
 
-	SetProperty(Beacon.Dot, "Size", UDim2.fromOffset(DotSize, DotSize))
-	SetProperty(Beacon.Dot, "Position", UDim2.fromOffset(BaseX, MiddleY))
-	SetProperty(Beacon.Dot, "BackgroundColor3", Color)
-	SetProperty(Beacon.Dot, "BackgroundTransparency", math.clamp(Transparency + 0.1, 0, 1))
-
-	if Settings.Pulse == true and Settings.PulseSpeed > 0 then
-		local Phase = ((os.clock() * Settings.PulseSpeed) + (self._Seed or 0)) % 1
-		local PulseSize = IconSize + 4 + (12 * Phase)
-		local PulseBaseTransparency = ApplyAlphaTransparency(Settings.PulseTransparency, Alpha)
-
-		SetProperty(Beacon.Pulse, "Visible", true)
-		SetProperty(Beacon.Pulse, "Size", UDim2.fromOffset(PulseSize, PulseSize))
-		SetProperty(Beacon.PulseStroke, "Color", Color)
-		SetProperty(Beacon.PulseStroke, "Transparency", PulseBaseTransparency + ((1 - PulseBaseTransparency) * Phase))
-	else
-		SetProperty(Beacon.Pulse, "Visible", false)
-	end
-
-	SetProperty(Beacon.LabelPanel, "Visible", Settings.Label == true)
-	SetProperty(Beacon.LabelPanel, "Position", UDim2.fromOffset(LabelOffset.X, LabelOffset.Y))
-	SetProperty(Beacon.LabelPanel, "Size", UDim2.fromOffset(LabelWidth, LabelHeight))
-	SetProperty(Beacon.LabelPanel, "BackgroundTransparency", ApplyAlphaTransparency(0.16, Alpha))
-	SetProperty(Beacon.LabelStroke, "Transparency", ApplyAlphaTransparency(0.84, Alpha))
-	SetProperty(Beacon.Accent, "BackgroundColor3", Color)
-	SetProperty(Beacon.Accent, "BackgroundTransparency", ApplyAlphaTransparency(0.04, Alpha))
+	SetProperty(Beacon.Label, "Visible", Settings.Label == true)
+	SetProperty(Beacon.Label, "Position", UDim2.fromOffset(LabelOffset.X, LabelOffset.Y))
+	SetProperty(Beacon.Label, "Size", UDim2.fromOffset(LabelWidth, LabelHeight))
+	SetProperty(Beacon.Label, "TextColor3", Color)
 	SetProperty(Beacon.Label, "Font", Settings.Font or Enum.Font.GothamMedium)
 	SetProperty(Beacon.Label, "TextSize", Settings.TextSize)
-	SetProperty(Beacon.Label, "TextTransparency", ApplyAlphaTransparency(0.04, Alpha))
+	SetProperty(Beacon.Label, "TextTransparency", Transparency)
+	SetProperty(Beacon.Label, "TextStrokeTransparency", ApplyAlphaTransparency(0.35, Alpha))
 
 	if Settings.Label == true then
 		SetProperty(Beacon.Label, "Text", LabelText)
@@ -2849,6 +2735,7 @@ function GeneratedObserver:_Flush()
 	local Processed = 0
 
 	while Processed < MaxPerStep do
+		-- Live generated objects always win over the startup scan backlog.
 		local Object = self:_PopQueue(self.Queue, "QueueHead")
 		if Object == nil then
 			Object = self:_PopQueue(self.ScanQueue, "ScanQueueHead")
@@ -2868,6 +2755,7 @@ function GeneratedObserver:_Scan()
 	self.ScanGeneration += 1
 	local Generation = self.ScanGeneration
 
+	-- Drop any old unfinished scan queue before starting a fresh scan.
 	for Index = self.ScanQueueHead, #self.ScanQueue do
 		local Object = self.ScanQueue[Index]
 		if Object then
