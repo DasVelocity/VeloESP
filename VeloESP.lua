@@ -505,26 +505,44 @@ local HiddenRoot = New("Folder", {
 local Path2DSupported = false
 
 do
-	local Success, Probe = pcall(Instance.new, "Path2D")
+	local Success = pcall(function()
+		local Probe = Instance.new("Path2D")
+		Probe.Parent = Root
+		Probe.Closed = false
+		Probe.Color3 = Color3.new(1, 1, 1)
+		Probe.Thickness = 2
+		Probe.Visible = false
+		Probe:SetControlPoints({
+			Path2DControlPoint.new(UDim2.fromOffset(0, 0)),
+			Path2DControlPoint.new(UDim2.fromOffset(1, 1)),
+		})
+		Probe:Destroy()
+	end)
 
-	if Success and Probe then
-		Path2DSupported = Path2DControlPoint ~= nil
-		Destroy(Probe)
-	end
+	Path2DSupported = Success == true
 end
 
 local TracerPointCache = setmetatable({}, { __mode = "k" })
 
 local function CreateTracerLine(Parent, Name)
 	if Path2DSupported then
-		return New("Path2D", {
-			Parent = Parent,
-			Name = Name,
-			Closed = false,
-			Color3 = Color3.new(1, 1, 1),
-			Thickness = 2,
-			Visible = false,
-		})
+		local Success, Path = pcall(function()
+			return New("Path2D", {
+				Parent = Root,
+				Name = Name,
+				Closed = false,
+				Color3 = Color3.new(1, 1, 1),
+				Thickness = 2,
+				ZIndex = 2,
+				Visible = false,
+			})
+		end)
+
+		if Success and Path then
+			return Path
+		end
+
+		Path2DSupported = false
 	end
 
 	return CreateLine(Parent, Name)
@@ -532,10 +550,10 @@ end
 
 local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transparency)
 	if Line == nil then
-		return
+		return nil
 	end
 
-	if Path2DSupported and Line:IsA("Path2D") then
+	if Line:IsA("Path2D") then
 		local Cache = TracerPointCache[Line]
 
 		if Cache == nil then
@@ -544,26 +562,44 @@ local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transpar
 		end
 
 		if Cache.AX ~= PointA.X or Cache.AY ~= PointA.Y or Cache.BX ~= PointB.X or Cache.BY ~= PointB.Y then
+			local Success = pcall(function()
+				Line:SetControlPoints({
+					Path2DControlPoint.new(UDim2.fromOffset(PointA.X, PointA.Y)),
+					Path2DControlPoint.new(UDim2.fromOffset(PointB.X, PointB.Y)),
+				})
+			end)
+
+			if not Success then
+				Path2DSupported = false
+				TracerPointCache[Line] = nil
+
+				local Parent = Line.Parent
+				Destroy(Line)
+
+				local Replacement = CreateLine(Parent or Root, "Tracer")
+				UpdateLine(Replacement, PointA, PointB, Thickness)
+				SetProperty(Replacement, "BackgroundColor3", Color)
+				SetProperty(Replacement, "BackgroundTransparency", Transparency)
+				SetProperty(Replacement, "Visible", true)
+
+				return Replacement
+			end
+
 			Cache.AX, Cache.AY, Cache.BX, Cache.BY = PointA.X, PointA.Y, PointB.X, PointB.Y
-			Line:SetControlPoints({
-				Path2DControlPoint.new(UDim2.fromOffset(PointA.X, PointA.Y)),
-				Path2DControlPoint.new(UDim2.fromOffset(PointB.X, PointB.Y)),
-			})
 		end
 
 		SetProperty(Line, "Thickness", math.max(1, Thickness))
 		SetProperty(Line, "Color3", Color)
+		pcall(SetProperty, Line, "Transparency", Transparency)
 
-		if CoreGuiAllowed then
-			SetProperty(Line, "Transparency", Transparency)
-		end
-
-		return
+		return Line
 	end
 
 	UpdateLine(Line, PointA, PointB, Thickness)
 	SetProperty(Line, "BackgroundColor3", Color)
 	SetProperty(Line, "BackgroundTransparency", Transparency)
+
+	return Line
 end
 
 local TextMeasureBounds = Vector2.new(4096, 4096)
@@ -1722,7 +1758,7 @@ function ESP:_RenderTracer(DeltaTime)
 	State.CurrentTo = SmoothVector2(State.CurrentTo, State.TargetTo, State.Smoothness, DeltaTime)
 
 	SetProperty(Tracer, "Visible", true)
-	UpdateTracerLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness, State.Color, State.Transparency)
+	self.UI.Tracer = UpdateTracerLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness, State.Color, State.Transparency)
 
 	return true
 end
