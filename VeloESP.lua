@@ -636,13 +636,91 @@ end
 
 local HighlightRegistry = setmetatable({}, { __mode = "k" })
 local ActiveHighlightESPs = setmetatable({}, { __mode = "k" })
+local HighlightsByAdornee = setmetatable({}, { __mode = "k" })
+local HighlightsUnderAncestor = setmetatable({}, { __mode = "k" })
+local ActiveByTarget = setmetatable({}, { __mode = "k" })
+local ActiveUnderAncestor = setmetatable({}, { __mode = "k" })
 
-local function TargetsOverlap(First, Second)
-	if typeof(First) ~= "Instance" or typeof(Second) ~= "Instance" then
-		return false
+local function GetWeakBucket(Index, Key)
+	if typeof(Key) ~= "Instance" then return nil end
+	local Bucket = Index[Key]
+	if not Bucket then
+		Bucket = setmetatable({}, { __mode = "k" })
+		Index[Key] = Bucket
 	end
+	return Bucket
+end
 
-	return First == Second or First:IsDescendantOf(Second) or Second:IsDescendantOf(First)
+local function AddIndexed(Index, Key, Value)
+	local Bucket = GetWeakBucket(Index, Key)
+	if Bucket then Bucket[Value] = true end
+end
+
+local function RemoveIndexed(Index, Key, Value)
+	local Bucket = Index[Key]
+	if not Bucket then return end
+	Bucket[Value] = nil
+	if next(Bucket) == nil then Index[Key] = nil end
+end
+
+local function WalkAncestors(Object, Callback)
+	local Current = Object
+	while typeof(Current) == "Instance" do
+		Callback(Current)
+		if Current == workspace then break end
+		Current = Current.Parent
+	end
+end
+
+local function UnindexHighlightRecord(Record)
+	local Adornee = Record.IndexedAdornee
+	if typeof(Adornee) ~= "Instance" then return end
+	RemoveIndexed(HighlightsByAdornee, Adornee, Record)
+	for _, Node in ipairs(Record.IndexNodes or {}) do
+		RemoveIndexed(HighlightsUnderAncestor, Node, Record)
+	end
+	Record.IndexedAdornee = nil
+	Record.IndexNodes = nil
+end
+
+local function IndexHighlightRecord(Record)
+	UnindexHighlightRecord(Record)
+	local Highlight = Record.Highlight
+	local Adornee = Highlight and Highlight.Adornee
+	if typeof(Adornee) ~= "Instance" then return end
+
+	Record.IndexedAdornee = Adornee
+	Record.IndexNodes = {}
+	AddIndexed(HighlightsByAdornee, Adornee, Record)
+	WalkAncestors(Adornee, function(Node)
+		Record.IndexNodes[#Record.IndexNodes + 1] = Node
+		AddIndexed(HighlightsUnderAncestor, Node, Record)
+	end)
+end
+
+local function UnindexActiveObject(Object)
+	local Target = Object._IndexedHighlightTarget
+	if typeof(Target) ~= "Instance" then return end
+	RemoveIndexed(ActiveByTarget, Target, Object)
+	for _, Node in ipairs(Object._HighlightIndexNodes or {}) do
+		RemoveIndexed(ActiveUnderAncestor, Node, Object)
+	end
+	Object._IndexedHighlightTarget = nil
+	Object._HighlightIndexNodes = nil
+end
+
+local function IndexActiveObject(Object)
+	UnindexActiveObject(Object)
+	local Target = Object.CurrentSettings and Object.CurrentSettings.Model
+	if typeof(Target) ~= "Instance" then return end
+
+	Object._IndexedHighlightTarget = Target
+	Object._HighlightIndexNodes = {}
+	AddIndexed(ActiveByTarget, Target, Object)
+	WalkAncestors(Target, function(Node)
+		Object._HighlightIndexNodes[#Object._HighlightIndexNodes + 1] = Node
+		AddIndexed(ActiveUnderAncestor, Node, Object)
+	end)
 end
 
 local function ApplyHighlightRecord(Record)
@@ -665,6 +743,70 @@ local function ApplyHighlightRecord(Record)
 	Record.InternalChange = false
 end
 
+local function AddSuppressor(Record, Object)
+	if not Record or not Object or Object.Destroyed == true or Object._HighlighterActive ~= true then return end
+	local Highlight = Record.Highlight
+	if not Highlight or not Highlight.Parent then return end
+
+	Record.Suppressors[Object] = true
+	Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
+	Object._SuppressedHighlights[Highlight] = true
+end
+
+local function ForOverlappingActive(Adornee, Callback)
+	if typeof(Adornee) ~= "Instance" then return end
+	local Seen = setmetatable({}, { __mode = "k" })
+
+	local Under = ActiveUnderAncestor[Adornee]
+	if Under then
+		for Object in pairs(Under) do
+			if not Seen[Object] then
+				Seen[Object] = true
+				Callback(Object)
+			end
+		end
+	end
+
+	WalkAncestors(Adornee, function(Node)
+		local Bucket = ActiveByTarget[Node]
+		if Bucket then
+			for Object in pairs(Bucket) do
+				if not Seen[Object] then
+					Seen[Object] = true
+					Callback(Object)
+				end
+			end
+		end
+	end)
+end
+
+local function ForOverlappingHighlights(Target, Callback)
+	if typeof(Target) ~= "Instance" then return end
+	local Seen = setmetatable({}, { __mode = "k" })
+
+	local Under = HighlightsUnderAncestor[Target]
+	if Under then
+		for Record in pairs(Under) do
+			if not Seen[Record] then
+				Seen[Record] = true
+				Callback(Record)
+			end
+		end
+	end
+
+	WalkAncestors(Target, function(Node)
+		local Bucket = HighlightsByAdornee[Node]
+		if Bucket then
+			for Record in pairs(Bucket) do
+				if not Seen[Record] then
+					Seen[Record] = true
+					Callback(Record)
+				end
+			end
+		end
+	end)
+end
+
 local function RefreshRegisteredHighlight(Record)
 	local Highlight = Record.Highlight
 	if Highlight == nil or Highlight.Parent == nil then
@@ -678,15 +820,12 @@ local function RefreshRegisteredHighlight(Record)
 	end
 	table.clear(Record.Suppressors)
 
+	IndexHighlightRecord(Record)
 	local Adornee = Highlight.Adornee
 	if Adornee ~= nil then
-		for Object in pairs(ActiveHighlightESPs) do
-			if Object.Destroyed ~= true and Object._HighlighterActive == true and TargetsOverlap(Object.CurrentSettings.Model, Adornee) then
-				Record.Suppressors[Object] = true
-				Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
-				Object._SuppressedHighlights[Highlight] = true
-			end
-		end
+		ForOverlappingActive(Adornee, function(Object)
+			AddSuppressor(Record, Object)
+		end)
 	end
 
 	ApplyHighlightRecord(Record)
@@ -729,6 +868,8 @@ local function UnregisterExternalHighlight(Highlight)
 		return
 	end
 
+	UnindexHighlightRecord(Record)
+
 	for Object in pairs(Record.Suppressors) do
 		if Object._SuppressedHighlights then
 			Object._SuppressedHighlights[Highlight] = nil
@@ -754,14 +895,12 @@ local function SetHighlightConflictProtection(Object, Active)
 		Object._HighlighterActive = true
 		ActiveHighlightESPs[Object] = true
 		Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
+		IndexActiveObject(Object)
 
-		for Highlight, Record in pairs(HighlightRegistry) do
-			if Highlight.Parent and TargetsOverlap(Object.CurrentSettings.Model, Highlight.Adornee) then
-				Record.Suppressors[Object] = true
-				Object._SuppressedHighlights[Highlight] = true
-				ApplyHighlightRecord(Record)
-			end
-		end
+		ForOverlappingHighlights(Object.CurrentSettings.Model, function(Record)
+			AddSuppressor(Record, Object)
+			ApplyHighlightRecord(Record)
+		end)
 		return
 	end
 
@@ -771,6 +910,7 @@ local function SetHighlightConflictProtection(Object, Active)
 
 	Object._HighlighterActive = false
 	ActiveHighlightESPs[Object] = nil
+	UnindexActiveObject(Object)
 
 	for Highlight in pairs(Object._SuppressedHighlights or {}) do
 		local Record = HighlightRegistry[Highlight]
@@ -929,10 +1069,11 @@ local SkeletonSegments = {
 }
 
 local VeloESP = {
-	Version = "5.4.0",
+	Version = "5.4.1",
 	_Destroyed = false,
 	_Objects = setmetatable({}, { __mode = "k" }),
 	_ObjectList = {},
+	_UpdateList = {},
 	_Watchers = {},
 	_Connections = {},
 	_SmoothObjects = setmetatable({}, { __mode = "k" }),
@@ -972,6 +1113,39 @@ local VeloESP = {
 }
 
 VeloESP.GlobalConfig = VeloESP.Settings
+
+local function AddUpdateObject(Object)
+	if Object._UpdateListIndex then return end
+	local List = VeloESP._UpdateList
+	local Index = #List + 1
+	List[Index] = Object
+	Object._UpdateListIndex = Index
+end
+
+local function RemoveUpdateObject(Object)
+	local Index = Object._UpdateListIndex
+	if not Index then return end
+
+	local List = VeloESP._UpdateList
+	local LastIndex = #List
+	local Last = List[LastIndex]
+
+	List[Index] = Last
+	List[LastIndex] = nil
+
+	if Last and Last ~= Object then
+		Last._UpdateListIndex = Index
+	end
+
+	Object._UpdateListIndex = nil
+
+	local Cursor = VeloESP._UpdateCursor or 1
+	if Cursor > #List then
+		VeloESP._UpdateCursor = 1
+	elseif Index < Cursor then
+		VeloESP._UpdateCursor = math.max(1, Cursor - 1)
+	end
+end
 
 local ESP = {}
 ESP.__index = ESP
@@ -2362,6 +2536,18 @@ function ESP:Set(Options)
 	Merge(self.CurrentSettings, Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
+
+	if self.Hidden == true or self.CurrentSettings.Visible == false then
+		RemoveUpdateObject(self)
+	else
+		AddUpdateObject(self)
+	end
+
+	if self._HighlighterActive == true then
+		SetHighlightConflictProtection(self, false)
+		SetHighlightConflictProtection(self, true)
+	end
+
 	self._SkeletonCache = nil
 	self._TracerState = nil
 	self._SkeletonState = nil
@@ -2394,12 +2580,14 @@ end
 function ESP:Show()
 	self.Hidden = false
 	self.CurrentSettings.Visible = true
+	AddUpdateObject(self)
 	return self
 end
 
 function ESP:Hide()
 	self.Hidden = true
 	self.CurrentSettings.Visible = false
+	RemoveUpdateObject(self)
 
 	if self.CurrentSettings.Fade.Enabled ~= true then
 		self:_HideAll()
@@ -2445,6 +2633,7 @@ function ESP:Destroy()
 	self.Destroyed = true
 	self.Deleted = true
 	VeloESP._SmoothObjects[self] = nil
+	RemoveUpdateObject(self)
 	SetHighlightConflictProtection(self, false)
 
 	if self.OriginalSettings.OnDestroy then
@@ -2526,6 +2715,7 @@ function VeloESP.new(Target, Options)
 	VeloESP._Objects[Target] = Object
 	Object._ListIndex = #VeloESP._ObjectList + 1
 	VeloESP._ObjectList[Object._ListIndex] = Object
+	AddUpdateObject(Object)
 
 	Object:_Create()
 	Object:_Update()
@@ -3296,7 +3486,7 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 		return
 	end
 
-	local ObjectList = VeloESP._ObjectList
+	local ObjectList = VeloESP._UpdateList
 	local Count = #ObjectList
 
 	if Count == 0 then
@@ -3349,7 +3539,7 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 			Count -= 1
 
 			if Last and Last ~= Object then
-				Last._ListIndex = Index
+				Last._UpdateListIndex = Index
 			end
 
 			if Count == 0 then
@@ -3359,7 +3549,7 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 				Index = 1
 			end
 		else
-			Object._ListIndex = Index
+			Object._UpdateListIndex = Index
 			Object:_Update(DeltaTime)
 			Updated += 1
 			Index += 1
