@@ -634,9 +634,6 @@ local function MeasureText(Text, TextSize, Font)
 	return Result
 end
 
--- Roblox does not expose a render-priority property for Highlight objects.
--- Keep VeloESP highlights authoritative by temporarily suppressing overlapping
--- game highlights and restoring their intended Enabled state afterward.
 local HighlightRegistry = setmetatable({}, { __mode = "k" })
 local ActiveHighlightESPs = setmetatable({}, { __mode = "k" })
 
@@ -1467,9 +1464,6 @@ function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
 
-	-- Freshly generated rigs are often parented before any BasePart exists.
-	-- Retry creation until an adornee becomes available instead of permanently
-	-- losing the text ESP because the first creation attempt happened too early.
 	if (Billboard == nil or Label == nil)
 		and Settings.Text == true
 		and Settings.Billboard ~= false
@@ -1527,8 +1521,6 @@ function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
 		Highlighter = nil
 	end
 
-	-- Adornment ESP types need a BasePart. If the model was still being built
-	-- when Add() ran, retry until the rig has a usable part.
 	if Highlighter == nil
 		and Settings.Highlight ~= false
 		and Settings.ESPType ~= "text"
@@ -2825,9 +2817,11 @@ function GeneratedObserver:_Enqueue(Object, IsScan)
 	self.Queued[Object] = true
 
 	if IsScan == true then
-		self.ScanQueue[#self.ScanQueue + 1] = Object
+		self.ScanQueueTail += 1
+		self.ScanQueue[self.ScanQueueTail] = Object
 	else
-		self.Queue[#self.Queue + 1] = Object
+		self.QueueTail += 1
+		self.Queue[self.QueueTail] = Object
 	end
 end
 
@@ -2870,18 +2864,17 @@ function GeneratedObserver:_ProcessObject(Object)
 	end
 end
 
-function GeneratedObserver:_PopQueue(Queue, HeadKey)
+function GeneratedObserver:_PopQueue(Queue, HeadKey, TailKey)
 	local Head = self[HeadKey]
-	local Object = Queue[Head]
 
-	if Object == nil then
-		if Head > 1 then
-			table.clear(Queue)
-			self[HeadKey] = 1
-		end
+	if Head > self[TailKey] then
+		table.clear(Queue)
+		self[HeadKey] = 1
+		self[TailKey] = 0
 		return nil
 	end
 
+	local Object = Queue[Head]
 	Queue[Head] = nil
 	self[HeadKey] = Head + 1
 	return Object
@@ -2896,10 +2889,9 @@ function GeneratedObserver:_Flush()
 	local Processed = 0
 
 	while Processed < MaxPerStep do
-		-- Live generated objects always win over the startup scan backlog.
-		local Object = self:_PopQueue(self.Queue, "QueueHead")
+		local Object = self:_PopQueue(self.Queue, "QueueHead", "QueueTail")
 		if Object == nil then
-			Object = self:_PopQueue(self.ScanQueue, "ScanQueueHead")
+			Object = self:_PopQueue(self.ScanQueue, "ScanQueueHead", "ScanQueueTail")
 		end
 
 		if Object == nil then
@@ -2916,8 +2908,7 @@ function GeneratedObserver:_Scan()
 	self.ScanGeneration += 1
 	local Generation = self.ScanGeneration
 
-	-- Drop any old unfinished scan queue before starting a fresh scan.
-	for Index = self.ScanQueueHead, #self.ScanQueue do
+	for Index = self.ScanQueueHead, self.ScanQueueTail do
 		local Object = self.ScanQueue[Index]
 		if Object then
 			self.Queued[Object] = nil
@@ -2925,6 +2916,7 @@ function GeneratedObserver:_Scan()
 	end
 	table.clear(self.ScanQueue)
 	self.ScanQueueHead = 1
+	self.ScanQueueTail = 0
 
 	local ScanBatchSize = math.max(1, tonumber(self.Options.ScanBatchSize) or 200)
 	local Root = self.Root
@@ -2959,8 +2951,10 @@ function GeneratedObserver:SetEnabled(Value)
 		self.ScanGeneration += 1
 		table.clear(self.Queue)
 		self.QueueHead = 1
+		self.QueueTail = 0
 		table.clear(self.ScanQueue)
 		self.ScanQueueHead = 1
+		self.ScanQueueTail = 0
 		table.clear(self.Queued)
 
 		for Object, Handle in pairs(self.Handles) do
@@ -3003,8 +2997,10 @@ function GeneratedObserver:Destroy()
 	table.clear(self.Connections)
 	table.clear(self.Queue)
 	self.QueueHead = 1
+	self.QueueTail = 0
 	table.clear(self.ScanQueue)
 	self.ScanQueueHead = 1
+	self.ScanQueueTail = 0
 	table.clear(self.Queued)
 	table.clear(self.Handles)
 end
@@ -3025,8 +3021,10 @@ function VeloESP.ObserveGenerated(RootObject, Options)
 		Destroyed = false,
 		Queue = {},
 		QueueHead = 1,
+		QueueTail = 0,
 		ScanQueue = {},
 		ScanQueueHead = 1,
+		ScanQueueTail = 0,
 		ScanGeneration = 0,
 		Queued = setmetatable({}, { __mode = "k" }),
 		Handles = setmetatable({}, { __mode = "k" }),
@@ -3205,11 +3203,25 @@ function VeloESP.Destroy()
 	end
 end
 
-for _, Descendant in ipairs(workspace:GetDescendants()) do
-	if Descendant:IsA("Highlight") then
-		RegisterExternalHighlight(Descendant)
+task.spawn(function()
+	local Queue = { workspace }
+	local Head, Tail = 1, 1
+	local Visited = 0
+	while Head <= Tail and VeloESP._Destroyed ~= true do
+		local Parent = Queue[Head]
+		Queue[Head] = nil
+		Head += 1
+		for _, Descendant in ipairs(Parent:GetChildren()) do
+			if Descendant:IsA("Highlight") then
+				RegisterExternalHighlight(Descendant)
+			end
+			Tail += 1
+			Queue[Tail] = Descendant
+			Visited += 1
+			if Visited % 200 == 0 then task.wait() end
+		end
 	end
-end
+end)
 
 table.insert(VeloESP._Connections, workspace.DescendantAdded:Connect(function(Descendant)
 	if Descendant:IsA("Highlight") then
