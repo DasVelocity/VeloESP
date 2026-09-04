@@ -2185,17 +2185,28 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 end
 
 function ESP:_GetUpdateRate(Distance)
+	local Settings = self.CurrentSettings
+	local Realtime = (Settings.Tracer.Enabled == true and VeloESP.Settings.Tracers == true)
+		or (Settings.EdgeBeacon.Enabled == true and VeloESP.Settings.EdgeBeacons == true)
+		or (Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
+		or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
+		or (Settings.Skeleton.Enabled == true and VeloESP.Settings.Skeleton == true)
+
+	if Realtime then
+		return 0
+	end
+
 	local Cache = VeloESP._RateCache
 	local GlobalRate, FarDistance, FarRate, NearRate
 
 	if Cache then
 		GlobalRate, FarDistance, FarRate, NearRate = Cache[1], Cache[2], Cache[3], Cache[4]
 	else
-		local Settings = VeloESP.Settings
-		GlobalRate = tonumber(Settings.UpdateRate) or 0
-		FarDistance = tonumber(Settings.FarDistance) or 650
-		FarRate = tonumber(Settings.FarUpdateRate) or 0
-		NearRate = tonumber(Settings.NearUpdateRate) or 0
+		local GlobalSettings = VeloESP.Settings
+		GlobalRate = tonumber(GlobalSettings.UpdateRate) or 0
+		FarDistance = tonumber(GlobalSettings.FarDistance) or 650
+		FarRate = tonumber(GlobalSettings.FarUpdateRate) or 0
+		NearRate = tonumber(GlobalSettings.NearUpdateRate) or 0
 	end
 
 	if GlobalRate > 0 then
@@ -2223,6 +2234,15 @@ function ESP:_Update(DeltaTime)
 		return
 	end
 
+	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
+
+	if self._LastDistance ~= nil and Settings.Fade.Enabled ~= true then
+		local CachedRate = self:_GetUpdateRate(self._LastDistance)
+		if CachedRate > 0 and self._UpdateElapsed < CachedRate then
+			return
+		end
+	end
+
 	local CFrame = GetCFrame(Settings.Model)
 
 	if CFrame == nil then
@@ -2236,8 +2256,6 @@ function ESP:_Update(DeltaTime)
 	if ActiveCamera then
 		Distance = (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
 	end
-
-	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
 
 	local BaseVisible = VeloESP.Settings.Enabled == true
 		and self.Hidden ~= true
@@ -2256,48 +2274,82 @@ function ESP:_Update(DeltaTime)
 	local Alpha = self:_StepFade(TargetAlpha, DeltaTime)
 	local Visible = Alpha > 0.01
 
+	self._LastDistance = Distance
+	self._Alpha = Alpha
+
 	if Visible ~= true then
 		self:_HideAll()
 		return
 	end
 
-	local ProjectedCFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY = GetProjectedVisibility(Settings.Model, self._ScreenCorners, CFrame)
+	local NeedsProjection = (Settings.Tracer.Enabled == true and VeloESP.Settings.Tracers == true)
+		or (Settings.EdgeBeacon.Enabled == true and VeloESP.Settings.EdgeBeacons == true)
+		or (Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
+		or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
+		or (Settings.Skeleton.Enabled == true and VeloESP.Settings.Skeleton == true)
 
-	if ProjectedCFrame == nil or ScreenPosition == nil then
-		self:_HideAll()
-		return
+	local ScreenPosition = self._LastScreenPosition
+	local OnScreen = true
+	local BoundsVisible = true
+	local ScreenCorners = self._ScreenCorners
+	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
+
+	if NeedsProjection then
+		local ProjectedCFrame
+		ProjectedCFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY = GetProjectedVisibility(Settings.Model, self._ScreenCorners, CFrame)
+
+		if ProjectedCFrame == nil or ScreenPosition == nil then
+			self:_HideAll()
+			return
+		end
+
+		local NeedsCorners = OnScreen
+			and (
+				(Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
+				or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
+			)
+		local CornerOnScreen = BoundsVisible
+
+		if NeedsCorners then
+			CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model, ScreenCorners)
+		end
+
+		self._ScreenCorners = ScreenCorners
+		self._LastScreenPosition = ScreenPosition
+		self._OnScreen = OnScreen
+		self._BoundsVisible = BoundsVisible
+
+		if Settings.BeforeUpdate then
+			SafeCall(Settings.BeforeUpdate, self)
+		end
+
+		self._AllHidden = false
+
+		self:_UpdateBillboard(Visible, BoundsVisible, Distance, Alpha)
+		self:_UpdateHighlighter(Visible, BoundsVisible, Alpha)
+		self:_UpdateBox2D(Visible, BoundsVisible, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
+		self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
+		self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
+		self:_UpdateEdgeBeacon(Visible, BoundsVisible, ScreenPosition, Distance, Alpha)
+		self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
+	else
+		self._OnScreen = true
+		self._BoundsVisible = true
+
+		if Settings.BeforeUpdate then
+			SafeCall(Settings.BeforeUpdate, self)
+		end
+
+		self._AllHidden = false
+
+		self:_UpdateBillboard(Visible, true, Distance, Alpha)
+		self:_UpdateHighlighter(Visible, true, Alpha)
+		self:_UpdateBox2D(Visible, false, Alpha, false, 0, 0, 0, 0)
+		self:_UpdateBox3D(Visible, Alpha, false, ScreenCorners)
+		self:_UpdateTracer(Visible, false, ScreenPosition, Alpha)
+		self:_UpdateEdgeBeacon(Visible, false, ScreenPosition, Distance, Alpha)
+		self:_UpdateSkeleton(Visible, false, Alpha, DeltaTime)
 	end
-
-	local NeedsCorners = OnScreen
-		and (
-			(Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
-			or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
-		)
-	local CornerOnScreen = BoundsVisible
-
-	if NeedsCorners then
-		CornerOnScreen, _, ScreenCorners, MinX, MinY, MaxX, MaxY = GetModelCorners(Settings.Model, ScreenCorners)
-	end
-
-	self._LastDistance = Distance
-	self._LastScreenPosition = ScreenPosition
-	self._OnScreen = OnScreen
-	self._BoundsVisible = BoundsVisible
-	self._Alpha = Alpha
-
-	if Settings.BeforeUpdate then
-		SafeCall(Settings.BeforeUpdate, self)
-	end
-
-	self._AllHidden = false
-
-	self:_UpdateBillboard(Visible, BoundsVisible, Distance, Alpha)
-	self:_UpdateHighlighter(Visible, BoundsVisible, Alpha)
-	self:_UpdateBox2D(Visible, BoundsVisible, Alpha, CornerOnScreen, MinX, MinY, MaxX, MaxY)
-	self:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
-	self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
-	self:_UpdateEdgeBeacon(Visible, BoundsVisible, ScreenPosition, Distance, Alpha)
-	self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 	if Settings.AfterUpdate then
 		SafeCall(Settings.AfterUpdate, self)
