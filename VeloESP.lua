@@ -3,9 +3,20 @@ local getgenv = getgenv or function()
 end
 
 local Environment = getgenv()
+local VERSION = "5.6.0"
 
 if Environment.VeloESP and Environment.VeloESP._Destroyed ~= true then
-	return Environment.VeloESP
+	local Existing = Environment.VeloESP
+	if Existing.Version == VERSION then
+		return Existing
+	end
+
+	
+	
+	if type(Existing.Destroy) == "function" then
+		local Success, Message = pcall(Existing.Destroy)
+		assert(Success, "[VeloESP] could not retire the previous renderer: " .. tostring(Message))
+	end
 end
 
 local cloneref = cloneref or function(Object)
@@ -19,80 +30,112 @@ local CoreGui = cloneref(game:GetService("CoreGui"))
 local TextService = cloneref(game:GetService("TextService"))
 local ReplicatedStorage = cloneref(game:GetService("ReplicatedStorage"))
 
+local DataModel = game
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
-local function SafeCall(Callback, ...)
+local Util = {}
+
+local WeakKeys = { __mode = "k" }
+local Traceback = debug.traceback
+
+function Util.WeakTable()
+	return setmetatable({}, WeakKeys)
+end
+
+local PropertyCache = Util.WeakTable()
+
+function Util.SafeCall(Callback, ...)
 	if typeof(Callback) ~= "function" then
 		return nil
 	end
 
-	local Packed = table.pack(xpcall(Callback, debug.traceback, ...))
+	local Ok, A, B, C, D = xpcall(Callback, Traceback, ...)
 
-	if not Packed[1] then
-		warn("[VeloESP] callback error:\n" .. tostring(Packed[2]))
+	if not Ok then
+		warn("[VeloESP] callback error:\n" .. tostring(A))
 		return nil
 	end
 
-	return table.unpack(Packed, 2, Packed.n)
+	return A, B, C, D
 end
 
-local function New(ClassName, Properties)
+function Util.New(ClassName, Properties)
 	local Object = Instance.new(ClassName)
 
-	for Property, Value in pairs(Properties or {}) do
-		if Property ~= "Parent" then
-			Object[Property] = Value
+	if Properties ~= nil then
+		for Property, Value in pairs(Properties) do
+			if Property ~= "Parent" then
+				Object[Property] = Value
+			end
 		end
-	end
 
-	if Properties and Properties.Parent ~= nil then
-		Object.Parent = Properties.Parent
+		if Properties.Parent ~= nil then
+			Object.Parent = Properties.Parent
+		end
 	end
 
 	return Object
 end
 
-local PropertyCache = setmetatable({}, { __mode = "k" })
+local function DestroyOne(Object)
+	Object:Destroy()
+end
 
-local function Destroy(Object)
+function Util.Destroy(Object)
 	if Object ~= nil then
 		PropertyCache[Object] = nil
-
-		pcall(function()
-			Object:Destroy()
-		end)
+		pcall(DestroyOne, Object)
 	end
 end
 
-local function ShallowCopy(Source)
-	local Result = {}
-
-	for Key, Value in pairs(Source or {}) do
-		Result[Key] = Value
+function Util.ShallowCopy(Source)
+	if Source == nil then
+		return {}
 	end
 
-	return Result
+	return table.clone(Source)
 end
 
-local function DeepCopy(Source)
+function Util.DeepCopy(Source)
 	if typeof(Source) ~= "table" then
 		return Source
 	end
 
-	local Result = {}
+	local Result = table.clone(Source)
 
-	for Key, Value in pairs(Source) do
-		Result[Key] = DeepCopy(Value)
+	for Key, Value in pairs(Result) do
+		if typeof(Value) == "table" then
+			Result[Key] = Util.DeepCopy(Value)
+		end
 	end
 
 	return Result
 end
 
-local function Merge(Target, Source)
-	for Key, Value in pairs(Source or {}) do
+function Util.CloneTemplate(Source, NestedKeys)
+	local Result = table.clone(Source)
+
+	for Index = 1, #NestedKeys do
+		local Key = NestedKeys[Index]
+		local Value = Result[Key]
+
+		if type(Value) == "table" then
+			Result[Key] = table.clone(Value)
+		end
+	end
+
+	return Result
+end
+
+function Util.Merge(Target, Source)
+	if Source == nil then
+		return Target
+	end
+
+	for Key, Value in pairs(Source) do
 		if typeof(Value) == "table" and typeof(Target[Key]) == "table" then
-			Merge(Target[Key], Value)
+			Util.Merge(Target[Key], Value)
 		else
 			Target[Key] = Value
 		end
@@ -101,7 +144,7 @@ local function Merge(Target, Source)
 	return Target
 end
 
-local function Resolve(Value, Object, Fallback)
+function Util.Resolve(Value, Object, Fallback)
 	if typeof(Value) == "function" then
 		local Success, Result = pcall(Value, Object)
 
@@ -119,7 +162,7 @@ local function Resolve(Value, Object, Fallback)
 	return Fallback
 end
 
-local function ClampNumber(Value, Min, Max, Fallback)
+function Util.ClampNumber(Value, Min, Max, Fallback)
 	Value = tonumber(Value)
 
 	if Value == nil then
@@ -129,7 +172,7 @@ local function ClampNumber(Value, Min, Max, Fallback)
 	return math.clamp(Value, Min, Max)
 end
 
-local function SetProperty(Object, Property, Value)
+function Util.SetProperty(Object, Property, Value)
 	if Object == nil then
 		return
 	end
@@ -149,7 +192,11 @@ local function SetProperty(Object, Property, Value)
 	Object[Property] = Value
 end
 
-local function Approach(Current, Target, Step)
+function Util.ForgetProperties(Object)
+	PropertyCache[Object] = nil
+end
+
+function Util.Approach(Current, Target, Step)
 	if Current < Target then
 		return math.min(Current + Step, Target)
 	elseif Current > Target then
@@ -159,7 +206,7 @@ local function Approach(Current, Target, Step)
 	return Target
 end
 
-local function GetSmoothingAlpha(Speed, DeltaTime)
+function Util.GetSmoothingAlpha(Speed, DeltaTime)
 	Speed = tonumber(Speed) or 0
 	DeltaTime = math.max(0, tonumber(DeltaTime) or 1 / 60)
 
@@ -170,7 +217,7 @@ local function GetSmoothingAlpha(Speed, DeltaTime)
 	return 1 - math.exp(-Speed * DeltaTime)
 end
 
-local function SmoothVector2(Current, Target, Speed, DeltaTime)
+function Util.SmoothVector2(Current, Target, Speed, DeltaTime)
 	if Target == nil then
 		return nil
 	end
@@ -179,7 +226,7 @@ local function SmoothVector2(Current, Target, Speed, DeltaTime)
 		return Target
 	end
 
-	local Alpha = GetSmoothingAlpha(Speed, DeltaTime)
+	local Alpha = Util.GetSmoothingAlpha(Speed, DeltaTime)
 
 	if Alpha >= 1 then
 		return Target
@@ -188,7 +235,19 @@ local function SmoothVector2(Current, Target, Speed, DeltaTime)
 	return Current + ((Target - Current) * Alpha)
 end
 
-local function ApplyAlphaTransparency(BaseTransparency, Alpha)
+function Util.ApplyAlphaTransparency(BaseTransparency, Alpha)
+	
+	
+	if Alpha == 1 and type(BaseTransparency) == "number" then
+		if BaseTransparency < 0 then
+			return 0
+		elseif BaseTransparency > 1 then
+			return 1
+		end
+
+		return BaseTransparency
+	end
+
 	BaseTransparency = tonumber(BaseTransparency) or 0
 	Alpha = tonumber(Alpha) or 1
 
@@ -207,7 +266,96 @@ local function ApplyAlphaTransparency(BaseTransparency, Alpha)
 	return 1 - ((1 - BaseTransparency) * Alpha)
 end
 
-local function GetCamera()
+local WeakTable = Util.WeakTable
+local SafeCall = Util.SafeCall
+local New = Util.New
+local Destroy = Util.Destroy
+local ShallowCopy = Util.ShallowCopy
+local DeepCopy = Util.DeepCopy
+local CloneTemplate = Util.CloneTemplate
+local Merge = Util.Merge
+local Resolve = Util.Resolve
+local SetProperty = Util.SetProperty
+local Approach = Util.Approach
+local SmoothVector2 = Util.SmoothVector2
+local ApplyAlphaTransparency = Util.ApplyAlphaTransparency
+
+local Queue = {}
+Queue.__index = Queue
+
+function Queue.new()
+	return setmetatable({ Items = {}, Head = 1, Tail = 0 }, Queue)
+end
+
+function Queue:Push(Item)
+	local Tail = self.Tail + 1
+	self.Tail = Tail
+	self.Items[Tail] = Item
+end
+
+function Queue:Pop()
+	local Head = self.Head
+
+	if Head > self.Tail then
+		self:Clear()
+		return nil
+	end
+
+	local Items = self.Items
+	local Item = Items[Head]
+	Items[Head] = nil
+	if Head == self.Tail then
+		self.Head = 1
+		self.Tail = 0
+	else
+		self.Head = Head + 1
+		
+		
+		if Head >= 1024 and Head >= self.Tail / 2 then
+			local Remaining = self.Tail - Head
+			table.move(Items, Head + 1, self.Tail, 1)
+			for Index = Remaining + 1, self.Tail do
+				Items[Index] = nil
+			end
+			self.Head = 1
+			self.Tail = Remaining
+		end
+	end
+	return Item
+end
+
+function Queue:IsEmpty()
+	return self.Head > self.Tail
+end
+
+function Queue:Clear()
+	if self.Tail > 0 then
+		table.clear(self.Items)
+	end
+
+	self.Head = 1
+	self.Tail = 0
+end
+
+function Queue:ForEach(Callback)
+	local Items = self.Items
+
+	for Index = self.Head, self.Tail do
+		local Item = Items[Index]
+
+		if Item ~= nil then
+			Callback(Item)
+		end
+	end
+end
+
+local Screen = {
+	CameraPosition = nil,
+	ViewportSize = nil,
+	Frame = 0,
+}
+
+function Screen.GetCamera()
 	if Camera == nil or Camera.Parent == nil then
 		Camera = workspace.CurrentCamera
 	end
@@ -215,16 +363,125 @@ local function GetCamera()
 	return Camera
 end
 
-local function GetPart(Target)
+function Screen.BeginFrame()
+	Screen.Frame += 1
+	Screen.CameraPosition = nil
+	Screen.ViewportSize = nil
+end
+
+function Screen.GetCameraPosition()
+	local Position = Screen.CameraPosition
+
+	if Position == nil then
+		local ActiveCamera = Screen.GetCamera()
+
+		if ActiveCamera == nil then
+			return nil
+		end
+
+		Position = ActiveCamera.CFrame.Position
+		Screen.CameraPosition = Position
+	end
+
+	return Position
+end
+
+function Screen.GetViewportSize()
+	local Size = Screen.ViewportSize
+
+	if Size == nil then
+		local ActiveCamera = Screen.GetCamera()
+
+		if ActiveCamera == nil then
+			return nil
+		end
+
+		Size = ActiveCamera.ViewportSize
+		Screen.ViewportSize = Size
+	end
+
+	return Size
+end
+
+function Screen.WorldToViewport(Position)
+	local ActiveCamera = Screen.GetCamera()
+
+	if ActiveCamera == nil then
+		return Vector3.zero, false
+	end
+
+	return ActiveCamera:WorldToViewportPoint(Position)
+end
+
+local GetCamera = Screen.GetCamera
+local GetCameraPosition = Screen.GetCameraPosition
+local GetViewportSize = Screen.GetViewportSize
+local WorldToViewport = Screen.WorldToViewport
+
+local Kind = {
+	Other = 0,
+	Part = 1,
+	Model = 2,
+	Attachment = 3,
+	Camera = 4,
+}
+
+local KindProbes = {
+	{ "BasePart", Kind.Part },
+	{ "Model", Kind.Model },
+	{ "Attachment", Kind.Attachment },
+	{ "Camera", Kind.Camera },
+}
+
+local KIND_OTHER = Kind.Other
+local KIND_PART = Kind.Part
+local KIND_MODEL = Kind.Model
+local KIND_ATTACHMENT = Kind.Attachment
+local KIND_CAMERA = Kind.Camera
+
+local UnitSize = Vector3.new(1, 1, 1)
+
+local Geometry = {
+	KindCache = WeakTable(),
+}
+
+function Geometry.GetKind(Target)
+	local Cache = Geometry.KindCache
+	local Resolved = Cache[Target]
+
+	if Resolved ~= nil then
+		return Resolved
+	end
+
+	Resolved = KIND_OTHER
+
+	for Index = 1, #KindProbes do
+		local Probe = KindProbes[Index]
+
+		if Target:IsA(Probe[1]) then
+			Resolved = Probe[2]
+			break
+		end
+	end
+
+	Cache[Target] = Resolved
+	return Resolved
+end
+
+local GetKind = Geometry.GetKind
+
+function Geometry.GetPart(Target)
 	if typeof(Target) ~= "Instance" then
 		return nil
 	end
 
-	if Target:IsA("BasePart") then
+	local Resolved = GetKind(Target)
+
+	if Resolved == KIND_PART then
 		return Target
 	end
 
-	if Target:IsA("Model") then
+	if Resolved == KIND_MODEL then
 		return Target.PrimaryPart
 			or Target:FindFirstChild("HumanoidRootPart")
 			or Target:FindFirstChildWhichIsA("BasePart", true)
@@ -233,15 +490,21 @@ local function GetPart(Target)
 	return Target:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function GetCFrame(Target)
+local GetPart = Geometry.GetPart
+
+function Geometry.GetCFrame(Target)
 	if typeof(Target) ~= "Instance" then
 		return nil
 	end
 
-	if Target:IsA("Model") then
-		local Success, Pivot = pcall(function()
-			return Target:GetPivot()
-		end)
+	local Resolved = GetKind(Target)
+
+	if Resolved == KIND_PART then
+		return Target.CFrame
+	end
+
+	if Resolved == KIND_MODEL then
+		local Success, Pivot = pcall(Target.GetPivot, Target)
 
 		if Success then
 			return Pivot
@@ -250,15 +513,11 @@ local function GetCFrame(Target)
 		return nil
 	end
 
-	if Target:IsA("BasePart") then
-		return Target.CFrame
-	end
-
-	if Target:IsA("Attachment") then
+	if Resolved == KIND_ATTACHMENT then
 		return Target.WorldCFrame
 	end
 
-	if Target:IsA("Camera") then
+	if Resolved == KIND_CAMERA then
 		return Target.CFrame
 	end
 
@@ -271,27 +530,35 @@ local function GetCFrame(Target)
 	return nil
 end
 
-local function GetBounds(Target)
+local GetCFrame = Geometry.GetCFrame
+
+function Geometry.GetBounds(Target)
 	if typeof(Target) ~= "Instance" then
 		return nil, nil
 	end
+	if Geometry.BoundsTarget == Target then
+		return Geometry.BoundsCFrame, Geometry.BoundsSize
+	end
 
-	if Target:IsA("Model") then
-		local Success, CFrame, Size = pcall(function()
-			return Target:GetBoundingBox()
-		end)
+	local Resolved = GetKind(Target)
+
+	if Resolved == KIND_MODEL then
+		local Success, BoundsCFrame, Size = pcall(Target.GetBoundingBox, Target)
 
 		if Success then
-			return CFrame, Size
+			Geometry.BoundsTarget = Target
+			Geometry.BoundsCFrame = BoundsCFrame
+			Geometry.BoundsSize = Size
+			return BoundsCFrame, Size
 		end
 	end
 
-	if Target:IsA("BasePart") then
+	if Resolved == KIND_PART then
 		return Target.CFrame, Target.Size
 	end
 
-	if Target:IsA("Attachment") then
-		return Target.WorldCFrame, Vector3.new(1, 1, 1)
+	if Resolved == KIND_ATTACHMENT then
+		return Target.WorldCFrame, UnitSize
 	end
 
 	local Part = GetPart(Target)
@@ -303,49 +570,32 @@ local function GetBounds(Target)
 	return nil, nil
 end
 
-local function WorldToViewport(Position)
-	local ActiveCamera = GetCamera()
+local GetBounds = Geometry.GetBounds
 
-	if ActiveCamera == nil then
-		return Vector3.zero, false
-	end
+function Geometry.GetDistance(Target, From)
+	local Origin = GetCFrame(Target)
 
-	return ActiveCamera:WorldToViewportPoint(Position)
-end
-
-local function GetDistance(Target, From)
-	local CFrame = GetCFrame(Target)
-
-	if CFrame == nil then
+	if Origin == nil then
 		return math.huge
 	end
 
 	if typeof(From) == "Instance" then
 		local FromCFrame = GetCFrame(From)
+
 		if FromCFrame then
-			return (CFrame.Position - FromCFrame.Position).Magnitude
+			return (Origin.Position - FromCFrame.Position).Magnitude
 		end
 	elseif typeof(From) == "Vector3" then
-		return (CFrame.Position - From).Magnitude
+		return (Origin.Position - From).Magnitude
 	end
 
-	local ActiveCamera = GetCamera()
+	local CameraPosition = GetCameraPosition()
 
-	if ActiveCamera then
-		return (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+	if CameraPosition then
+		return (Origin.Position - CameraPosition).Magnitude
 	end
 
 	return math.huge
-end
-
-local function UpdateLine(Frame, PointA, PointB, Thickness)
-	local Delta = PointB - PointA
-	local Center = PointA + Delta / 2
-
-	SetProperty(Frame, "AnchorPoint", Vector2.new(0.5, 0.5))
-	SetProperty(Frame, "Position", UDim2.fromOffset(Center.X, Center.Y))
-	SetProperty(Frame, "Size", UDim2.fromOffset(math.max(1, Delta.Magnitude), math.max(1, Thickness)))
-	SetProperty(Frame, "Rotation", math.deg(math.atan2(Delta.Y, Delta.X)))
 end
 
 local ModelCornerSigns = {
@@ -359,10 +609,10 @@ local ModelCornerSigns = {
 	{ -1, -1, -1 },
 }
 
-local function GetModelCorners(Target, ScreenCorners)
-	local CFrame, Size = GetBounds(Target)
+function Geometry.GetModelCorners(Target, ScreenCorners)
+	local BoundsCFrame, Size = GetBounds(Target)
 
-	if not (CFrame and Size) then
+	if not (BoundsCFrame and Size) then
 		return false, nil, ScreenCorners or {}, 0, 0, 0, 0
 	end
 
@@ -372,7 +622,7 @@ local function GetModelCorners(Target, ScreenCorners)
 		return false, nil, ScreenCorners or {}, 0, 0, 0, 0
 	end
 
-	ScreenCorners = ScreenCorners or {}
+	ScreenCorners = ScreenCorners or table.create(8)
 
 	local OnScreen = false
 	local MinX, MinY = math.huge, math.huge
@@ -381,7 +631,7 @@ local function GetModelCorners(Target, ScreenCorners)
 
 	for Index = 1, 8 do
 		local Sign = ModelCornerSigns[Index]
-		local ScreenPoint, Visible = ActiveCamera:WorldToViewportPoint(CFrame * Vector3.new(X * Sign[1], Y * Sign[2], Z * Sign[3]))
+		local ScreenPoint, Visible = ActiveCamera:WorldToViewportPoint(BoundsCFrame * Vector3.new(X * Sign[1], Y * Sign[2], Z * Sign[3]))
 		ScreenCorners[Index] = ScreenPoint
 
 		if ScreenPoint.Z > 0 then
@@ -400,22 +650,24 @@ local function GetModelCorners(Target, ScreenCorners)
 	return OnScreen, nil, ScreenCorners, MinX, MinY, MaxX, MaxY
 end
 
-local function GetProjectedVisibility(Target, ScreenCorners, ResolvedCFrame)
-	local CFrame = ResolvedCFrame or GetCFrame(Target)
+local GetModelCorners = Geometry.GetModelCorners
 
-	if CFrame == nil then
+function Geometry.GetProjectedVisibility(Target, ScreenCorners, ResolvedCFrame)
+	local Origin = ResolvedCFrame or GetCFrame(Target)
+
+	if Origin == nil then
 		return nil, false, false, ScreenCorners, 0, 0, 0, 0
 	end
 
-	local ScreenPosition, OnScreen = WorldToViewport(CFrame.Position)
+	local ScreenPosition, OnScreen = WorldToViewport(Origin.Position)
 	local BoundsVisible = OnScreen
 	local MinX, MinY, MaxX, MaxY = 0, 0, 0, 0
+	local ShouldCheckBounds = false
 
-	local ShouldCheckBounds = not OnScreen and (
-		Target:IsA("Model")
-		or Target:IsA("BasePart")
-		or Target:IsA("Attachment")
-	)
+	if not OnScreen then
+		local Resolved = GetKind(Target)
+		ShouldCheckBounds = Resolved == KIND_MODEL or Resolved == KIND_PART or Resolved == KIND_ATTACHMENT
+	end
 
 	if ShouldCheckBounds then
 		local CornerVisible
@@ -423,10 +675,24 @@ local function GetProjectedVisibility(Target, ScreenCorners, ResolvedCFrame)
 		BoundsVisible = CornerVisible == true
 	end
 
-	return CFrame, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY
+	return Origin, ScreenPosition, OnScreen, BoundsVisible, ScreenCorners, MinX, MinY, MaxX, MaxY
 end
 
-local function CreateLine(Parent, Name)
+local GetProjectedVisibility = Geometry.GetProjectedVisibility
+
+local Draw = {}
+
+function Draw.UpdateLine(Frame, PointA, PointB, Thickness)
+	local Delta = PointB - PointA
+	local Center = PointA + Delta / 2
+
+	SetProperty(Frame, "AnchorPoint", Vector2.new(0.5, 0.5))
+	SetProperty(Frame, "Position", UDim2.fromOffset(Center.X, Center.Y))
+	SetProperty(Frame, "Size", UDim2.fromOffset(math.max(1, Delta.Magnitude), math.max(1, Thickness)))
+	SetProperty(Frame, "Rotation", math.deg(math.atan2(Delta.Y, Delta.X)))
+end
+
+function Draw.CreateLine(Parent, Name)
 	return New("Frame", {
 		Parent = Parent,
 		Name = Name,
@@ -436,12 +702,19 @@ local function CreateLine(Parent, Name)
 	})
 end
 
-local function BuildComponentSettings(Value, Defaults)
+local UpdateLine = Draw.UpdateLine
+local CreateLine = Draw.CreateLine
+
+local function BuildComponentSettings(Value, Template, PreMerged)
 	if typeof(Value) == "table" then
-		return Merge(DeepCopy(Defaults), Value)
+		if Value == PreMerged then
+			return Value
+		end
+
+		return Merge(table.clone(Template), Value)
 	end
 
-	local Result = DeepCopy(Defaults)
+	local Result = table.clone(Template)
 
 	if typeof(Value) == "boolean" then
 		Result.Enabled = Value
@@ -502,7 +775,10 @@ local HiddenRoot = New("Folder", {
 	Name = "VeloESPStorage",
 })
 
-local Path2DSupported = false
+Draw.Path2DSupported = false
+Draw.TracerPoints = WeakTable()
+
+Draw.TracerIsPath = WeakTable()
 
 do
 	local Success = pcall(function()
@@ -519,13 +795,14 @@ do
 		Probe:Destroy()
 	end)
 
-	Path2DSupported = Success == true
+	Draw.Path2DSupported = Success == true
 end
 
-local TracerPointCache = setmetatable({}, { __mode = "k" })
+local TracerPointCache = Draw.TracerPoints
+local TracerIsPath = Draw.TracerIsPath
 
-local function CreateTracerLine(Parent, Name)
-	if Path2DSupported then
+function Draw.CreateTracerLine(Parent, Name)
+	if Draw.Path2DSupported then
 		local Success, Path = pcall(function()
 			return New("Path2D", {
 				Parent = Root,
@@ -539,21 +816,22 @@ local function CreateTracerLine(Parent, Name)
 		end)
 
 		if Success and Path then
+			TracerIsPath[Path] = true
 			return Path
 		end
 
-		Path2DSupported = false
+		Draw.Path2DSupported = false
 	end
 
 	return CreateLine(Parent, Name)
 end
 
-local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transparency)
+function Draw.UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transparency)
 	if Line == nil then
 		return nil
 	end
 
-	if Line:IsA("Path2D") then
+	if TracerIsPath[Line] then
 		local Cache = TracerPointCache[Line]
 
 		if Cache == nil then
@@ -562,16 +840,25 @@ local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transpar
 		end
 
 		if Cache.AX ~= PointA.X or Cache.AY ~= PointA.Y or Cache.BX ~= PointB.X or Cache.BY ~= PointB.Y then
-			local Success = pcall(function()
-				Line:SetControlPoints({
-					Path2DControlPoint.new(UDim2.fromOffset(PointA.X, PointA.Y)),
-					Path2DControlPoint.new(UDim2.fromOffset(PointB.X, PointB.Y)),
-				})
-			end)
+			
+			
+			
+			local Points = Cache.Points
+
+			if Points == nil then
+				Points = table.create(2)
+				Cache.Points = Points
+			end
+
+			Points[1] = Path2DControlPoint.new(UDim2.fromOffset(PointA.X, PointA.Y))
+			Points[2] = Path2DControlPoint.new(UDim2.fromOffset(PointB.X, PointB.Y))
+
+			local Success = pcall(Line.SetControlPoints, Line, Points)
 
 			if not Success then
-				Path2DSupported = false
+				Draw.Path2DSupported = false
 				TracerPointCache[Line] = nil
+				TracerIsPath[Line] = nil
 
 				local Parent = Line.Parent
 				Destroy(Line)
@@ -602,129 +889,256 @@ local function UpdateTracerLine(Line, PointA, PointB, Thickness, Color, Transpar
 	return Line
 end
 
-local TextMeasureBounds = Vector2.new(4096, 4096)
-local TextMeasureCache = {}
-local TextMeasureCount = 0
+local CreateTracerLine = Draw.CreateTracerLine
+local UpdateTracerLine = Draw.UpdateTracerLine
 
-local function MeasureText(Text, TextSize, Font)
-	local Key = Text .. "|" .. tostring(TextSize) .. "|" .. tostring(Font)
-	local Cached = TextMeasureCache[Key]
+local Text = {
+	Bounds = Vector2.new(4096, 4096),
+	Cache = {},
+	Count = 0,
+	Limit = 512,
+	Entries = {},
+	Cursor = 1,
+}
+
+function Text.Measure(Value, TextSize, Font)
+	local Cache = Text.Cache
+	local FontBucket = Cache[Font]
+
+	if FontBucket == nil then
+		FontBucket = {}
+		Cache[Font] = FontBucket
+	end
+
+	local SizeBucket = FontBucket[TextSize]
+
+	if SizeBucket == nil then
+		SizeBucket = {}
+		FontBucket[TextSize] = SizeBucket
+	end
+
+	local Cached = SizeBucket[Value]
 
 	if Cached ~= nil then
 		return Cached
 	end
 
-	local Success, Result = pcall(function()
-		return TextService:GetTextSize(Text, TextSize, Font, TextMeasureBounds)
-	end)
+	local Success, Result = pcall(TextService.GetTextSize, TextService, Value, TextSize, Font, Text.Bounds)
 
 	if not (Success and typeof(Result) == "Vector2") then
-		local Characters = utf8.len(Text) or #Text
+		local Characters = utf8.len(Value) or #Value
 		Result = Vector2.new(Characters * TextSize * 0.54, TextSize)
 	end
 
-	if TextMeasureCount >= 512 then
-		table.clear(TextMeasureCache)
-		TextMeasureCount = 0
+	
+	
+	local Slot = Text.Cursor
+	local Entry = Text.Entries[Slot]
+	if Entry then
+		local OldBucket = Entry.Bucket
+		OldBucket[Entry.Value] = nil
+		if OldBucket ~= SizeBucket and next(OldBucket) == nil then
+			local OldFontBucket = Cache[Entry.Font]
+			OldFontBucket[Entry.Size] = nil
+			if next(OldFontBucket) == nil then
+				Cache[Entry.Font] = nil
+			end
+		end
+	else
+		Entry = {}
+		Text.Entries[Slot] = Entry
+		Text.Count += 1
 	end
-
-	TextMeasureCache[Key] = Result
-	TextMeasureCount += 1
+	Entry.Bucket = SizeBucket
+	Entry.Value = Value
+	Entry.Font = Font
+	Entry.Size = TextSize
+	Text.Cursor = Slot % Text.Limit + 1
+	SizeBucket[Value] = Result
 
 	return Result
 end
 
-local HighlightRegistry = setmetatable({}, { __mode = "k" })
-local ActiveHighlightESPs = setmetatable({}, { __mode = "k" })
-local HighlightsByAdornee = setmetatable({}, { __mode = "k" })
-local HighlightsUnderAncestor = setmetatable({}, { __mode = "k" })
-local ActiveByTarget = setmetatable({}, { __mode = "k" })
-local ActiveUnderAncestor = setmetatable({}, { __mode = "k" })
+local MeasureText = Text.Measure
 
-local function GetWeakBucket(Index, Key)
-	if typeof(Key) ~= "Instance" then return nil end
-	local Bucket = Index[Key]
-	if not Bucket then
-		Bucket = setmetatable({}, { __mode = "k" })
-		Index[Key] = Bucket
-	end
-	return Bucket
-end
+local Conflict = {
+	Index = {
+		Registry = WeakTable(),
+		Active = WeakTable(),
+		HighlightsByAdornee = WeakTable(),
+		HighlightsUnderNode = WeakTable(),
+		ActiveByTarget = WeakTable(),
+		ActiveUnderNode = WeakTable(),
+	},
+	
+	Scratch = {
+		Ancestors = table.create(32),
+		Seen = WeakTable(),
+		Visit = table.create(64),
+	},
+}
+
+local ConflictIndex = Conflict.Index
+local ConflictScratch = Conflict.Scratch
+local HighlightRegistry = ConflictIndex.Registry
+local AncestorScratch = ConflictScratch.Ancestors
+local SeenScratch = ConflictScratch.Seen
+local VisitScratch = ConflictScratch.Visit
 
 local function AddIndexed(Index, Key, Value)
-	local Bucket = GetWeakBucket(Index, Key)
-	if Bucket then Bucket[Value] = true end
+	local Bucket = Index[Key]
+
+	if Bucket == nil then
+		Bucket = setmetatable({}, WeakKeys)
+		Index[Key] = Bucket
+	end
+
+	Bucket[Value] = true
 end
 
 local function RemoveIndexed(Index, Key, Value)
 	local Bucket = Index[Key]
-	if not Bucket then return end
+
+	if Bucket == nil then
+		return
+	end
+
 	Bucket[Value] = nil
-	if next(Bucket) == nil then Index[Key] = nil end
+
+	if next(Bucket) == nil then
+		Index[Key] = nil
+	end
 end
 
-local function WalkAncestors(Object, Callback)
+local function CollectAncestors(Object)
+	local Count = 0
 	local Current = Object
+
 	while typeof(Current) == "Instance" do
-		Callback(Current)
-		if Current == workspace then break end
+		Count += 1
+		AncestorScratch[Count] = Current
+
+		if Current == workspace then
+			break
+		end
+
 		Current = Current.Parent
 	end
-end
-
-local function UnindexHighlightRecord(Record)
-	local Adornee = Record.IndexedAdornee
-	if typeof(Adornee) ~= "Instance" then return end
-	RemoveIndexed(HighlightsByAdornee, Adornee, Record)
-	for _, Node in ipairs(Record.IndexNodes or {}) do
-		RemoveIndexed(HighlightsUnderAncestor, Node, Record)
+	for Index = Count + 1, #AncestorScratch do
+		AncestorScratch[Index] = nil
 	end
-	Record.IndexedAdornee = nil
-	Record.IndexNodes = nil
+
+	return Count
 end
 
-local function IndexHighlightRecord(Record)
-	UnindexHighlightRecord(Record)
-	local Highlight = Record.Highlight
-	local Adornee = Highlight and Highlight.Adornee
-	if typeof(Adornee) ~= "Instance" then return end
+local HighlightSide = {
+	ExactIndex = ConflictIndex.HighlightsByAdornee,
+	NodeIndex = ConflictIndex.HighlightsUnderNode,
+	KeyField = "IndexedAdornee",
+	NodesField = "IndexNodes",
+}
 
-	Record.IndexedAdornee = Adornee
-	Record.IndexNodes = {}
-	AddIndexed(HighlightsByAdornee, Adornee, Record)
-	WalkAncestors(Adornee, function(Node)
-		Record.IndexNodes[#Record.IndexNodes + 1] = Node
-		AddIndexed(HighlightsUnderAncestor, Node, Record)
-	end)
-end
+local ActiveSide = {
+	ExactIndex = ConflictIndex.ActiveByTarget,
+	NodeIndex = ConflictIndex.ActiveUnderNode,
+	KeyField = "_IndexedHighlightTarget",
+	NodesField = "_HighlightIndexNodes",
+}
 
-local function UnindexActiveObject(Object)
-	local Target = Object._IndexedHighlightTarget
-	if typeof(Target) ~= "Instance" then return end
-	RemoveIndexed(ActiveByTarget, Target, Object)
-	for _, Node in ipairs(Object._HighlightIndexNodes or {}) do
-		RemoveIndexed(ActiveUnderAncestor, Node, Object)
+local function Unindex(Side, Holder)
+	local Key = Holder[Side.KeyField]
+
+	if typeof(Key) ~= "Instance" then
+		return
 	end
-	Object._IndexedHighlightTarget = nil
-	Object._HighlightIndexNodes = nil
+
+	RemoveIndexed(Side.ExactIndex, Key, Holder)
+
+	local Nodes = Holder[Side.NodesField]
+
+	if Nodes ~= nil then
+		local NodeIndex = Side.NodeIndex
+
+		for Index = 1, #Nodes do
+			RemoveIndexed(NodeIndex, Nodes[Index], Holder)
+		end
+
+		table.clear(Nodes)
+	end
+
+	Holder[Side.KeyField] = nil
 end
 
-local function IndexActiveObject(Object)
-	UnindexActiveObject(Object)
-	local Target = Object.CurrentSettings and Object.CurrentSettings.Model
-	if typeof(Target) ~= "Instance" then return end
+local function Reindex(Side, Holder, Key)
+	Unindex(Side, Holder)
 
-	Object._IndexedHighlightTarget = Target
-	Object._HighlightIndexNodes = {}
-	AddIndexed(ActiveByTarget, Target, Object)
-	WalkAncestors(Target, function(Node)
-		Object._HighlightIndexNodes[#Object._HighlightIndexNodes + 1] = Node
-		AddIndexed(ActiveUnderAncestor, Node, Object)
-	end)
+	if typeof(Key) ~= "Instance" then
+		return
+	end
+
+	Holder[Side.KeyField] = Key
+
+	local Nodes = Holder[Side.NodesField]
+
+	if Nodes == nil then
+		Nodes = {}
+		Holder[Side.NodesField] = Nodes
+	end
+
+	AddIndexed(Side.ExactIndex, Key, Holder)
+
+	local Count = CollectAncestors(Key)
+	local NodeIndex = Side.NodeIndex
+
+	for Index = 1, Count do
+		local Node = AncestorScratch[Index]
+		Nodes[Index] = Node
+		AddIndexed(NodeIndex, Node, Holder)
+	end
+end
+
+local function GatherOverlapping(ExactIndex, NodeIndex, Anchor)
+	if typeof(Anchor) ~= "Instance" then
+		return 0
+	end
+
+	local Count = 0
+	table.clear(SeenScratch)
+
+	local Under = NodeIndex[Anchor]
+
+	if Under then
+		for Holder in pairs(Under) do
+			if not SeenScratch[Holder] then
+				SeenScratch[Holder] = true
+				Count += 1
+				VisitScratch[Count] = Holder
+			end
+		end
+	end
+
+	local Depth = CollectAncestors(Anchor)
+
+	for Index = 1, Depth do
+		local Bucket = ExactIndex[AncestorScratch[Index]]
+
+		if Bucket then
+			for Holder in pairs(Bucket) do
+				if not SeenScratch[Holder] then
+					SeenScratch[Holder] = true
+					Count += 1
+					VisitScratch[Count] = Holder
+				end
+			end
+		end
+	end
+
+	return Count
 end
 
 local function ApplyHighlightRecord(Record)
 	local Highlight = Record.Highlight
+
 	if Highlight == nil or Highlight.Parent == nil then
 		return
 	end
@@ -733,6 +1147,7 @@ local function ApplyHighlightRecord(Record)
 	local Wanted = Record.WantedEnabled == true
 
 	Record.InternalChange = true
+
 	if ShouldSuppress then
 		if Highlight.Enabled then
 			Highlight.Enabled = false
@@ -740,99 +1155,68 @@ local function ApplyHighlightRecord(Record)
 	elseif Highlight.Enabled ~= Wanted then
 		Highlight.Enabled = Wanted
 	end
+
 	Record.InternalChange = false
 end
 
 local function AddSuppressor(Record, Object)
-	if not Record or not Object or Object.Destroyed == true or Object._HighlighterActive ~= true then return end
+	if not Record or not Object or Object.Destroyed == true or Object._HighlighterActive ~= true then
+		return
+	end
+
 	local Highlight = Record.Highlight
-	if not Highlight or not Highlight.Parent then return end
+
+	if not Highlight or not Highlight.Parent then
+		return
+	end
 
 	Record.Suppressors[Object] = true
-	Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
-	Object._SuppressedHighlights[Highlight] = true
-end
 
-local function ForOverlappingActive(Adornee, Callback)
-	if typeof(Adornee) ~= "Instance" then return end
-	local Seen = setmetatable({}, { __mode = "k" })
+	local Suppressed = Object._SuppressedHighlights
 
-	local Under = ActiveUnderAncestor[Adornee]
-	if Under then
-		for Object in pairs(Under) do
-			if not Seen[Object] then
-				Seen[Object] = true
-				Callback(Object)
-			end
-		end
+	if Suppressed == nil then
+		Suppressed = WeakTable()
+		Object._SuppressedHighlights = Suppressed
 	end
 
-	WalkAncestors(Adornee, function(Node)
-		local Bucket = ActiveByTarget[Node]
-		if Bucket then
-			for Object in pairs(Bucket) do
-				if not Seen[Object] then
-					Seen[Object] = true
-					Callback(Object)
-				end
-			end
-		end
-	end)
-end
-
-local function ForOverlappingHighlights(Target, Callback)
-	if typeof(Target) ~= "Instance" then return end
-	local Seen = setmetatable({}, { __mode = "k" })
-
-	local Under = HighlightsUnderAncestor[Target]
-	if Under then
-		for Record in pairs(Under) do
-			if not Seen[Record] then
-				Seen[Record] = true
-				Callback(Record)
-			end
-		end
-	end
-
-	WalkAncestors(Target, function(Node)
-		local Bucket = HighlightsByAdornee[Node]
-		if Bucket then
-			for Record in pairs(Bucket) do
-				if not Seen[Record] then
-					Seen[Record] = true
-					Callback(Record)
-				end
-			end
-		end
-	end)
+	Suppressed[Highlight] = true
 end
 
 local function RefreshRegisteredHighlight(Record)
 	local Highlight = Record.Highlight
+
 	if Highlight == nil or Highlight.Parent == nil then
 		return
 	end
 
 	for Object in pairs(Record.Suppressors) do
-		if Object._SuppressedHighlights then
-			Object._SuppressedHighlights[Highlight] = nil
+		local Suppressed = Object._SuppressedHighlights
+
+		if Suppressed then
+			Suppressed[Highlight] = nil
 		end
 	end
+
 	table.clear(Record.Suppressors)
 
-	IndexHighlightRecord(Record)
 	local Adornee = Highlight.Adornee
+	Reindex(HighlightSide, Record, Adornee)
+
 	if Adornee ~= nil then
-		ForOverlappingActive(Adornee, function(Object)
+		local Count = GatherOverlapping(ConflictIndex.ActiveByTarget, ConflictIndex.ActiveUnderNode, Adornee)
+
+		for Index = 1, Count do
+			local Object = VisitScratch[Index]
+			VisitScratch[Index] = nil
 			AddSuppressor(Record, Object)
-		end)
+		end
 	end
 
 	ApplyHighlightRecord(Record)
 end
 
-local function RegisterExternalHighlight(Highlight)
-	if not Highlight:IsA("Highlight") or Highlight:IsDescendantOf(WorldRoot) or HighlightRegistry[Highlight] then
+function Conflict.Register(Highlight)
+	if HighlightRegistry[Highlight] ~= nil or Highlight:IsDescendantOf(WorldRoot) then
 		return
 	end
 
@@ -840,7 +1224,7 @@ local function RegisterExternalHighlight(Highlight)
 		Highlight = Highlight,
 		WantedEnabled = Highlight.Enabled,
 		InternalChange = false,
-		Suppressors = setmetatable({}, { __mode = "k" }),
+		Suppressors = WeakTable(),
 	}
 	HighlightRegistry[Highlight] = Record
 
@@ -850,6 +1234,7 @@ local function RegisterExternalHighlight(Highlight)
 		end
 
 		Record.WantedEnabled = Highlight.Enabled
+
 		if next(Record.Suppressors) ~= nil and Highlight.Enabled then
 			ApplyHighlightRecord(Record)
 		end
@@ -862,23 +1247,27 @@ local function RegisterExternalHighlight(Highlight)
 	RefreshRegisteredHighlight(Record)
 end
 
-local function UnregisterExternalHighlight(Highlight)
+function Conflict.Unregister(Highlight)
 	local Record = HighlightRegistry[Highlight]
+
 	if Record == nil then
 		return
 	end
 
-	UnindexHighlightRecord(Record)
+	Unindex(HighlightSide, Record)
 
 	for Object in pairs(Record.Suppressors) do
-		if Object._SuppressedHighlights then
-			Object._SuppressedHighlights[Highlight] = nil
+		local Suppressed = Object._SuppressedHighlights
+
+		if Suppressed then
+			Suppressed[Highlight] = nil
 		end
 	end
 
 	if Record.EnabledConnection then
 		Record.EnabledConnection:Disconnect()
 	end
+
 	if Record.AdorneeConnection then
 		Record.AdorneeConnection:Disconnect()
 	end
@@ -886,21 +1275,31 @@ local function UnregisterExternalHighlight(Highlight)
 	HighlightRegistry[Highlight] = nil
 end
 
-local function SetHighlightConflictProtection(Object, Active)
+function Conflict.SetActive(Object, Active)
 	if Active then
 		if Object._HighlighterActive == true then
 			return
 		end
 
 		Object._HighlighterActive = true
-		ActiveHighlightESPs[Object] = true
-		Object._SuppressedHighlights = Object._SuppressedHighlights or setmetatable({}, { __mode = "k" })
-		IndexActiveObject(Object)
+		ConflictIndex.Active[Object] = true
 
-		ForOverlappingHighlights(Object.CurrentSettings.Model, function(Record)
+		if Object._SuppressedHighlights == nil then
+			Object._SuppressedHighlights = WeakTable()
+		end
+
+		local Target = Object.CurrentSettings and Object.CurrentSettings.Model
+		Reindex(ActiveSide, Object, Target)
+
+		local Count = GatherOverlapping(ConflictIndex.HighlightsByAdornee, ConflictIndex.HighlightsUnderNode, Target)
+
+		for Index = 1, Count do
+			local Record = VisitScratch[Index]
+			VisitScratch[Index] = nil
 			AddSuppressor(Record, Object)
 			ApplyHighlightRecord(Record)
-		end)
+		end
+
 		return
 	end
 
@@ -909,21 +1308,28 @@ local function SetHighlightConflictProtection(Object, Active)
 	end
 
 	Object._HighlighterActive = false
-	ActiveHighlightESPs[Object] = nil
-	UnindexActiveObject(Object)
+	ConflictIndex.Active[Object] = nil
+	Unindex(ActiveSide, Object)
 
-	for Highlight in pairs(Object._SuppressedHighlights or {}) do
-		local Record = HighlightRegistry[Highlight]
-		if Record then
-			Record.Suppressors[Object] = nil
-			ApplyHighlightRecord(Record)
+	local Suppressed = Object._SuppressedHighlights
+
+	if Suppressed ~= nil then
+		for Highlight in pairs(Suppressed) do
+			local Record = HighlightRegistry[Highlight]
+
+			if Record then
+				Record.Suppressors[Object] = nil
+				ApplyHighlightRecord(Record)
+			end
 		end
-	end
 
-	if Object._SuppressedHighlights then
-		table.clear(Object._SuppressedHighlights)
+		table.clear(Suppressed)
 	end
 end
+
+local RegisterExternalHighlight = Conflict.Register
+local UnregisterExternalHighlight = Conflict.Unregister
+local SetHighlightConflictProtection = Conflict.SetActive
 
 local Defaults = {
 	Name = nil,
@@ -1026,14 +1432,30 @@ local AllowedTracerFrom = {
 	mouse = true,
 }
 
-local AllowedESPType = {
-	text = true,
-	highlight = true,
-	selectionbox = true,
-	adornment = true,
-	boxadornment = true,
-	sphereadornment = true,
-	cylinderadornment = true,
+local HighlightClass = {
+	None = 0,
+	Fill = 1,
+	Selection = 2,
+	Box = 3,
+	Sphere = 4,
+	Cylinder = 5,
+}
+
+local HIGHLIGHT_CLASS_NONE = HighlightClass.None
+local HIGHLIGHT_CLASS_FILL = HighlightClass.Fill
+local HIGHLIGHT_CLASS_SELECTION = HighlightClass.Selection
+local HIGHLIGHT_CLASS_BOX = HighlightClass.Box
+local HIGHLIGHT_CLASS_SPHERE = HighlightClass.Sphere
+local HIGHLIGHT_CLASS_CYLINDER = HighlightClass.Cylinder
+
+local ESPTypes = {
+	text = { Class = HIGHLIGHT_CLASS_NONE },
+	highlight = { Class = HIGHLIGHT_CLASS_FILL, ClassName = "Highlight" },
+	selectionbox = { Class = HIGHLIGHT_CLASS_SELECTION, ClassName = "SelectionBox" },
+	adornment = { Class = HIGHLIGHT_CLASS_BOX, ClassName = "BoxHandleAdornment", NeedsPart = true },
+	boxadornment = { Class = HIGHLIGHT_CLASS_BOX, ClassName = "BoxHandleAdornment", NeedsPart = true },
+	sphereadornment = { Class = HIGHLIGHT_CLASS_SPHERE, ClassName = "SphereHandleAdornment", NeedsPart = true },
+	cylinderadornment = { Class = HIGHLIGHT_CLASS_CYLINDER, ClassName = "CylinderHandleAdornment", NeedsPart = true },
 }
 
 local Box3DIndices = {
@@ -1069,14 +1491,14 @@ local SkeletonSegments = {
 }
 
 local VeloESP = {
-	Version = "5.4.1",
+	Version = VERSION,
 	_Destroyed = false,
-	_Objects = setmetatable({}, { __mode = "k" }),
+	_Objects = WeakTable(),
 	_ObjectList = {},
 	_UpdateList = {},
 	_Watchers = {},
 	_Connections = {},
-	_SmoothObjects = setmetatable({}, { __mode = "k" }),
+	_SmoothObjects = WeakTable(),
 	Roots = {
 		Gui = Root,
 		Overlay = OverlayRoot,
@@ -1109,7 +1531,20 @@ local VeloESP = {
 		MaxPerFrame = 120,
 		FrameBudget = 1 / 300,
 		BudgetCheckInterval = 8,
+		
+		
+		HighlightScanPerFrame = 24,
+		ReapPerFrame = 8,
+		ReapSweepFrames = 60,
+		
+		
+		
+		HighlightConflictProtection = true,
 	},
+	_AnyOverlay = true,
+	_AnyRateLimit = true,
+	_ReapCursor = 1,
+	_Elapsed = 0,
 }
 
 VeloESP.GlobalConfig = VeloESP.Settings
@@ -1120,6 +1555,9 @@ local function AddUpdateObject(Object)
 	local Index = #List + 1
 	List[Index] = Object
 	Object._UpdateListIndex = Index
+	Object._LastUpdateTime = VeloESP._Elapsed
+	Object._UpdateElapsed = 0
+	Object._LastDistance = nil
 end
 
 local function RemoveUpdateObject(Object)
@@ -1147,12 +1585,271 @@ local function RemoveUpdateObject(Object)
 	end
 end
 
+local function RegisterWatcher(Object)
+	local List = VeloESP._Watchers
+	Object._WatcherIndex = #List + 1
+	List[Object._WatcherIndex] = Object
+end
+
+local function RemoveWatcher(Object)
+	local Index = Object._WatcherIndex
+	if Index == nil then
+		return
+	end
+	local List = VeloESP._Watchers
+	local LastIndex = #List
+	local Last = List[LastIndex]
+	List[Index] = Last
+	List[LastIndex] = nil
+	if Last ~= nil and Last ~= Object then
+		Last._WatcherIndex = Index
+	end
+	Object._WatcherIndex = nil
+end
+
+local Pool = {
+	Limit = 64,
+	Kinds = {},
+}
+
+local function DefinePool(Name, Quiet, IsUsable)
+	local Kind = {
+		Name = Name,
+		Items = {},
+		Count = 0,
+		
+		Free = {},
+		FreeCount = 0,
+		Quiet = Quiet,
+		IsUsable = IsUsable,
+	}
+
+	Pool.Kinds[Name] = Kind
+	return Kind
+end
+
+local function TakeEntry(Kind)
+	local Count = Kind.FreeCount
+
+	if Count > 0 then
+		local Entry = Kind.Free[Count]
+		Kind.Free[Count] = nil
+		Kind.FreeCount = Count - 1
+		return Entry
+	end
+
+	return {}
+end
+
+local function GiveBackEntry(Kind, Entry)
+	Entry.Instance = nil
+	Entry.Label = nil
+
+	local Count = Kind.FreeCount + 1
+	Kind.FreeCount = Count
+	Kind.Free[Count] = Entry
+end
+
+local HighlightPool = DefinePool("Highlight", function(Entry)
+	local Highlight = Entry.Instance
+	Highlight.Enabled = false
+	Highlight.Adornee = nil
+	Highlight.Parent = HiddenRoot
+end, function(Entry)
+	return Entry.Instance.Parent ~= nil
+end)
+
+local BillboardPool = DefinePool("Billboard", function(Entry)
+	local Gui = Entry.Instance
+	Gui.Enabled = false
+	Gui.Adornee = nil
+	Gui.Parent = HiddenRoot
+end, function(Entry)
+	return Entry.Instance.Parent ~= nil and Entry.Label.Parent == Entry.Instance
+end)
+
+function Pool.Acquire(Kind)
+	while Kind.Count > 0 do
+		local Count = Kind.Count
+		local Entry = Kind.Items[Count]
+		Kind.Items[Count] = nil
+		Kind.Count = Count - 1
+
+		
+		
+		if Kind.IsUsable(Entry) then
+			return Entry
+		end
+		Destroy(Entry.Instance)
+		GiveBackEntry(Kind, Entry)
+	end
+	return nil
+end
+
+function Pool.Release(Kind, Entry)
+	if Entry == nil or Entry.Instance == nil then
+		return false
+	end
+
+	if Kind.Count >= Pool.Limit then
+		Destroy(Entry.Instance)
+		GiveBackEntry(Kind, Entry)
+		return true
+	end
+
+	if not pcall(Kind.Quiet, Entry) then
+		Destroy(Entry.Instance)
+		GiveBackEntry(Kind, Entry)
+		return true
+	end
+
+	
+	
+	Util.ForgetProperties(Entry.Instance)
+
+	if Entry.Label ~= nil then
+		Util.ForgetProperties(Entry.Label)
+	end
+
+	local Count = Kind.Count + 1
+	Kind.Count = Count
+	Kind.Items[Count] = Entry
+	return true
+end
+
+function Pool.AcquireHighlight()
+	local Entry = Pool.Acquire(HighlightPool)
+
+	if Entry == nil then
+		return nil
+	end
+
+	local Highlight = Entry.Instance
+	GiveBackEntry(HighlightPool, Entry)
+	return Highlight
+end
+
+function Pool.ReleaseHighlight(Highlight)
+	if Highlight == nil then
+		return
+	end
+
+	local Entry = TakeEntry(HighlightPool)
+	Entry.Instance = Highlight
+	Pool.Release(HighlightPool, Entry)
+end
+
+function Pool.AcquireBillboard()
+	local Entry = Pool.Acquire(BillboardPool)
+
+	if Entry == nil then
+		return nil, nil
+	end
+
+	local Gui, Label = Entry.Instance, Entry.Label
+	GiveBackEntry(BillboardPool, Entry)
+	return Gui, Label
+end
+
+function Pool.ReleaseBillboard(Gui, Label)
+	if Gui == nil or Label == nil then
+		Destroy(Gui)
+		Destroy(Label)
+		return
+	end
+
+	local Entry = TakeEntry(BillboardPool)
+	Entry.Instance = Gui
+	Entry.Label = Label
+	Pool.Release(BillboardPool, Entry)
+end
+
+local AcquireHighlight = Pool.AcquireHighlight
+local ReleaseHighlight = Pool.ReleaseHighlight
+local AcquireBillboard = Pool.AcquireBillboard
+local ReleaseBillboard = Pool.ReleaseBillboard
+
 local ESP = {}
 ESP.__index = ESP
 
+function ESP:_BindModelWatch()
+	local Model = self.CurrentSettings and self.CurrentSettings.Model
+
+	if self._WatchedModel == Model then
+		return
+	end
+
+	local Existing = self._ModelWatch
+
+	if Existing then
+		Existing:Disconnect()
+		self._ModelWatch = nil
+	end
+
+	self._WatchedModel = Model
+
+	if typeof(Model) ~= "Instance" then
+		return
+	end
+
+	local Ok, Connection = pcall(function()
+		return Model.Destroying:Connect(function()
+			self:Destroy()
+		end)
+	end)
+
+	if Ok then
+		self._ModelWatch = Connection
+	end
+end
+
+local ComponentSpecs = {
+	{ Key = "Tracer" },
+	{ Key = "Arrow" },
+	{ Key = "EdgeBeacon", Alias = "Arrow" },
+	{ Key = "Box2D", Alias = "Box" },
+	{ Key = "Box3D" },
+	{ Key = "Skeleton" },
+	{ Key = "Fade" },
+}
+
+local ComponentKeys = table.create(#ComponentSpecs)
+
+for Index = 1, #ComponentSpecs do
+	ComponentKeys[Index] = ComponentSpecs[Index].Key
+end
+
+local NumberRules = {
+	{ Field = "MaxDistance" },
+	{ Field = "Thickness" },
+	{ Field = "Transparency", Min = 0, Max = 1 },
+	{ Field = "FillTransparency", Min = 0, Max = 1 },
+	{ Field = "OutlineTransparency", Min = 0, Max = 1 },
+	{ Field = "TextTransparency", Min = 0, Max = 1 },
+	{ Field = "TextStrokeTransparency", Min = 0, Max = 1 },
+	{ Table = "EdgeBeacon", Field = "Margin", Min = 0 },
+	{ Table = "EdgeBeacon", Field = "Length", Min = 8 },
+	{ Table = "EdgeBeacon", Field = "Thickness", Min = 1 },
+	{ Table = "EdgeBeacon", Field = "DotSize", Min = 2 },
+	{ Table = "EdgeBeacon", Field = "PulseSpeed", Min = 0 },
+	{ Table = "EdgeBeacon", Field = "TextSize", Min = 8 },
+	{ Table = "EdgeBeacon", Field = "Transparency", Min = 0, Max = 1 },
+	{ Table = "EdgeBeacon", Field = "PulseTransparency", Min = 0, Max = 1 },
+	{ Table = "Tracer", Field = "Smoothness", Min = 0 },
+	{ Table = "Skeleton", Field = "UpdateRate", Min = 0 },
+	{ Table = "Skeleton", Field = "Smoothness", Min = 0 },
+	{ Table = "Fade", Field = "Speed", Min = 0 },
+	{ Table = "Fade", Field = "Near", Min = 0 },
+	{ Table = "Fade", Field = "Min", Min = 0, Max = 1 },
+	{ Table = "Fade", Field = "Max", Min = 0, Max = 1 },
+}
+
 local function NormalizeOptions(Target, Options)
-	local Final = DeepCopy(Defaults)
-	Merge(Final, Options or {})
+	local Final = CloneTemplate(Defaults, ComponentKeys)
+
+	if Options ~= nil then
+		Merge(Final, Options)
+	end
 
 	Final.Model = Final.Model or Target
 	Final.TextModel = Final.TextModel or Final.Model
@@ -1169,13 +1866,21 @@ local function NormalizeOptions(Target, Options)
 		Final.OutlineColor = Final.Color
 	end
 
-	Final.Tracer = BuildComponentSettings(Final.Tracer, Defaults.Tracer)
-	Final.Arrow = BuildComponentSettings(Final.Arrow, Defaults.Arrow)
-	Final.EdgeBeacon = BuildComponentSettings(Final.EdgeBeacon or Final.Arrow, Defaults.EdgeBeacon)
-	Final.Box2D = BuildComponentSettings(Final.Box2D or Final.Box, Defaults.Box2D)
-	Final.Box3D = BuildComponentSettings(Final.Box3D, Defaults.Box3D)
-	Final.Skeleton = BuildComponentSettings(Final.Skeleton, Defaults.Skeleton)
-	Final.Fade = BuildComponentSettings(Final.Fade, Defaults.Fade)
+	for Index = 1, #ComponentSpecs do
+		local Spec = ComponentSpecs[Index]
+		local Key = Spec.Key
+		local Value = Final[Key]
+
+		if Value == nil or Value == false then
+			local Alias = Spec.Alias
+
+			if Alias ~= nil and Final[Alias] ~= nil then
+				Value = Final[Alias]
+			end
+		end
+
+		Final[Key] = BuildComponentSettings(Value, Defaults[Key], Final[Key])
+	end
 
 	if typeof(Final.Box) == "boolean" then
 		Final.Box2D.Enabled = Final.Box
@@ -1193,40 +1898,43 @@ local function NormalizeOptions(Target, Options)
 	end
 
 	local Type = string.lower(tostring(Final.ESPType or "Highlight"))
-	if AllowedESPType[Type] then
+	if ESPTypes[Type] ~= nil then
 		Final.ESPType = Type
 	else
 		Final.ESPType = "highlight"
 	end
 
-	Final.MaxDistance = tonumber(Final.MaxDistance) or Defaults.MaxDistance
-	Final.Thickness = tonumber(Final.Thickness) or Defaults.Thickness
-	Final.Transparency = ClampNumber(Final.Transparency, 0, 1, Defaults.Transparency)
-	Final.FillTransparency = ClampNumber(Final.FillTransparency, 0, 1, Defaults.FillTransparency)
-	Final.OutlineTransparency = ClampNumber(Final.OutlineTransparency, 0, 1, Defaults.OutlineTransparency)
-	Final.TextTransparency = ClampNumber(Final.TextTransparency, 0, 1, Defaults.TextTransparency)
-	Final.TextStrokeTransparency = ClampNumber(Final.TextStrokeTransparency, 0, 1, Defaults.TextStrokeTransparency)
-	Final.EdgeBeacon.Margin = math.max(0, tonumber(Final.EdgeBeacon.Margin) or Defaults.EdgeBeacon.Margin)
-	Final.EdgeBeacon.Length = math.max(8, tonumber(Final.EdgeBeacon.Length) or Defaults.EdgeBeacon.Length)
-	Final.EdgeBeacon.Thickness = math.max(1, tonumber(Final.EdgeBeacon.Thickness) or Defaults.EdgeBeacon.Thickness)
-	Final.EdgeBeacon.DotSize = math.max(2, tonumber(Final.EdgeBeacon.DotSize) or Defaults.EdgeBeacon.DotSize)
-	Final.EdgeBeacon.PulseSpeed = math.max(0, tonumber(Final.EdgeBeacon.PulseSpeed) or Defaults.EdgeBeacon.PulseSpeed)
-	Final.EdgeBeacon.TextSize = math.max(8, tonumber(Final.EdgeBeacon.TextSize) or Defaults.EdgeBeacon.TextSize)
-	Final.EdgeBeacon.Transparency = ClampNumber(Final.EdgeBeacon.Transparency, 0, 1, Defaults.EdgeBeacon.Transparency)
-	Final.EdgeBeacon.PulseTransparency = ClampNumber(Final.EdgeBeacon.PulseTransparency, 0, 1, Defaults.EdgeBeacon.PulseTransparency)
+	
+	
+	
+	for Index = 1, #NumberRules do
+		local Rule = NumberRules[Index]
+		local Holder = Rule.Table and Final[Rule.Table] or Final
+		local Template = Rule.Table and Defaults[Rule.Table] or Defaults
+		local Field = Rule.Field
+		local Value = tonumber(Holder[Field])
+
+		if Value == nil then
+			Value = Template[Field]
+		end
+
+		if Rule.Max ~= nil then
+			Holder[Field] = math.clamp(Value, Rule.Min, Rule.Max)
+		elseif Rule.Min ~= nil then
+			Holder[Field] = math.max(Rule.Min, Value)
+		else
+			Holder[Field] = Value
+		end
+	end
+
 	if typeof(Final.EdgeBeacon.Font) ~= "EnumItem" then
 		Final.EdgeBeacon.Font = Defaults.EdgeBeacon.Font
 	end
-	Final.Tracer.Smoothness = math.max(0, tonumber(Final.Tracer.Smoothness) or Defaults.Tracer.Smoothness)
-	Final.Skeleton.UpdateRate = math.max(0, tonumber(Final.Skeleton.UpdateRate) or Defaults.Skeleton.UpdateRate)
-	Final.Skeleton.Smoothness = math.max(0, tonumber(Final.Skeleton.Smoothness) or Defaults.Skeleton.Smoothness)
-	Final.Fade.Speed = math.max(0, tonumber(Final.Fade.Speed) or Defaults.Fade.Speed)
+
+	
 	Final.Fade.InSpeed = math.max(0, tonumber(Final.Fade.InSpeed) or Final.Fade.Speed)
 	Final.Fade.OutSpeed = math.max(0, tonumber(Final.Fade.OutSpeed) or Final.Fade.Speed)
-	Final.Fade.Near = math.max(0, tonumber(Final.Fade.Near) or Defaults.Fade.Near)
 	Final.Fade.Far = tonumber(Final.Fade.Far) or Final.MaxDistance
-	Final.Fade.Min = ClampNumber(Final.Fade.Min, 0, 1, Defaults.Fade.Min)
-	Final.Fade.Max = ClampNumber(Final.Fade.Max, 0, 1, Defaults.Fade.Max)
 
 	return Final
 end
@@ -1292,36 +2000,148 @@ function ESP:_CreateBillboard()
 		return
 	end
 
-	local Billboard = New("BillboardGui", {
-		Parent = BillboardRoot,
-		Name = "Billboard",
-		Adornee = Adornee,
-		AlwaysOnTop = true,
-		LightInfluence = 0,
-		ResetOnSpawn = false,
-		Size = UDim2.fromOffset(260, 58),
-		StudsOffset = Settings.StudsOffset,
-		Enabled = false,
-	})
+	local Billboard, Label = AcquireBillboard()
 
-	local Label = New("TextLabel", {
-		Parent = Billboard,
-		BackgroundTransparency = 1,
-		BorderSizePixel = 0,
-		Size = UDim2.fromScale(1, 1),
-		Font = Settings.Font,
-		RichText = true,
-		Text = "",
-		TextColor3 = Settings.Color,
-		TextSize = Settings.TextSize,
-		TextStrokeTransparency = 0,
-		TextWrapped = true,
-	})
+	if Billboard ~= nil then
+		Billboard.Adornee = Adornee
+		Billboard.StudsOffset = Settings.StudsOffset
+		Billboard.Enabled = false
+		Billboard.Parent = BillboardRoot
+		Label.Font = Settings.Font
+		Label.Text = ""
+		Label.TextColor3 = Settings.Color
+		Label.TextSize = Settings.TextSize
+		Label.TextTransparency = 0
+		Label.TextStrokeTransparency = 0
+	else
+		Billboard = New("BillboardGui", {
+			Parent = BillboardRoot,
+			Name = "Billboard",
+			Adornee = Adornee,
+			AlwaysOnTop = true,
+			LightInfluence = 0,
+			ResetOnSpawn = false,
+			Size = UDim2.fromOffset(260, 58),
+			StudsOffset = Settings.StudsOffset,
+			Enabled = false,
+		})
+
+		Label = New("TextLabel", {
+			Parent = Billboard,
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Size = UDim2.fromScale(1, 1),
+			Font = Settings.Font,
+			RichText = true,
+			Text = "",
+			TextColor3 = Settings.Color,
+			TextSize = Settings.TextSize,
+			TextStrokeTransparency = 0,
+			TextWrapped = true,
+		})
+	end
 
 	self.UI.Billboard = Billboard
 	self.UI.Label = Label
 	self._TextAdornee = Adornee
+	
+	
+	self._LabelText = nil
+	self._LabelName = nil
+	self._LabelStuds = nil
+	self._BbColor = nil
+	self._BbTextTransparency = nil
+	self._BbStrokeTransparency = nil
+	self._BbFont = nil
+	self._BbTextSize = nil
+	self._BbStudsOffset = nil
 end
+
+ESPTypes.highlight.Build = function(Settings, Target)
+	local Highlighter = AcquireHighlight()
+
+	if Highlighter ~= nil then
+		Highlighter.Adornee = Target
+		Highlighter.FillColor = Settings.FillColor
+		Highlighter.OutlineColor = Settings.OutlineColor
+		Highlighter.FillTransparency = Settings.FillTransparency
+		Highlighter.OutlineTransparency = Settings.OutlineTransparency
+		Highlighter.Enabled = false
+		Highlighter.Parent = WorldRoot
+		return Highlighter
+	end
+
+	return New("Highlight", {
+		Parent = WorldRoot,
+		Name = "Highlight",
+		Adornee = Target,
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+		FillColor = Settings.FillColor,
+		OutlineColor = Settings.OutlineColor,
+		FillTransparency = Settings.FillTransparency,
+		OutlineTransparency = Settings.OutlineTransparency,
+		Enabled = false,
+	})
+end
+
+ESPTypes.selectionbox.Build = function(Settings, Target)
+	return New("SelectionBox", {
+		Parent = WorldRoot,
+		Name = "SelectionBox",
+		Adornee = Target,
+		Color3 = Settings.Color,
+		LineThickness = Settings.Thickness,
+		SurfaceColor3 = Settings.SurfaceColor,
+		SurfaceTransparency = Settings.Transparency,
+		Visible = false,
+	})
+end
+
+ESPTypes.sphereadornment.Build = function(Settings, Target, Part, Size)
+	return New("SphereHandleAdornment", {
+		Parent = WorldRoot,
+		Name = "SphereAdornment",
+		Adornee = Part,
+		AlwaysOnTop = true,
+		ZIndex = 10,
+		Radius = math.max(Size.X, Size.Y, Size.Z) * 0.62,
+		Color3 = Settings.Color,
+		Transparency = Settings.Transparency,
+		Visible = false,
+	})
+end
+
+ESPTypes.cylinderadornment.Build = function(Settings, Target, Part, Size)
+	return New("CylinderHandleAdornment", {
+		Parent = WorldRoot,
+		Name = "CylinderAdornment",
+		Adornee = Part,
+		AlwaysOnTop = true,
+		ZIndex = 10,
+		Height = Size.Y,
+		Radius = math.max(Size.X, Size.Z) * 0.55,
+		CFrame = CFrame.Angles(math.rad(90), 0, 0),
+		Color3 = Settings.Color,
+		Transparency = Settings.Transparency,
+		Visible = false,
+	})
+end
+
+ESPTypes.adornment.Build = function(Settings, Target, Part, Size)
+	return New("BoxHandleAdornment", {
+		Parent = WorldRoot,
+		Name = "BoxAdornment",
+		Adornee = Part,
+		AlwaysOnTop = true,
+		ZIndex = 10,
+		Size = Size,
+		Color3 = Settings.Color,
+		Transparency = Settings.Transparency,
+		Visible = false,
+	})
+end
+
+ESPTypes.boxadornment.Build = ESPTypes.adornment.Build
 
 function ESP:_CreateHighlighter()
 	if self.UI.Highlighter then
@@ -1331,89 +2151,39 @@ function ESP:_CreateHighlighter()
 	local Settings = self.CurrentSettings
 	local Type = Settings.ESPType
 
-	if Type == "text" or Settings.Highlight == false then
+	if Settings.Highlight == false then
+		return
+	end
+
+	local Spec = ESPTypes[Type]
+
+	if Spec == nil or Spec.Build == nil then
 		return
 	end
 
 	local Target = Settings.Model
-	local Part = nil
-	local Size = nil
-	local Highlighter = nil
+	local Highlighter
 
-	if string.find(Type, "adornment") then
-		Part = GetPart(Target)
+	if Spec.NeedsPart then
+		local Part = GetPart(Target)
+
 		if Part == nil then
 			return
 		end
 
 		local _, BoundsSize = GetBounds(Target)
-		Size = BoundsSize or Part.Size
-
-		if Type == "sphereadornment" then
-			Highlighter = New("SphereHandleAdornment", {
-				Parent = WorldRoot,
-				Name = "SphereAdornment",
-				Adornee = Part,
-				AlwaysOnTop = true,
-				ZIndex = 10,
-				Radius = math.max(Size.X, Size.Y, Size.Z) * 0.62,
-				Color3 = Settings.Color,
-				Transparency = Settings.Transparency,
-				Visible = false,
-			})
-		elseif Type == "cylinderadornment" then
-			Highlighter = New("CylinderHandleAdornment", {
-				Parent = WorldRoot,
-				Name = "CylinderAdornment",
-				Adornee = Part,
-				AlwaysOnTop = true,
-				ZIndex = 10,
-				Height = Size.Y,
-				Radius = math.max(Size.X, Size.Z) * 0.55,
-				CFrame = CFrame.Angles(math.rad(90), 0, 0),
-				Color3 = Settings.Color,
-				Transparency = Settings.Transparency,
-				Visible = false,
-			})
-		else
-			Highlighter = New("BoxHandleAdornment", {
-				Parent = WorldRoot,
-				Name = "BoxAdornment",
-				Adornee = Part,
-				AlwaysOnTop = true,
-				ZIndex = 10,
-				Size = Size,
-				Color3 = Settings.Color,
-				Transparency = Settings.Transparency,
-				Visible = false,
-			})
-		end
-	elseif Type == "selectionbox" then
-		Highlighter = New("SelectionBox", {
-			Parent = WorldRoot,
-			Name = "SelectionBox",
-			Adornee = Target,
-			Color3 = Settings.Color,
-			LineThickness = Settings.Thickness,
-			SurfaceColor3 = Settings.SurfaceColor,
-			SurfaceTransparency = Settings.Transparency,
-			Visible = false,
-		})
-	elseif Type == "highlight" then
-		Highlighter = New("Highlight", {
-			Parent = WorldRoot,
-			Name = "Highlight",
-			Adornee = Target,
-			DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
-			FillColor = Settings.FillColor,
-			OutlineColor = Settings.OutlineColor,
-			FillTransparency = Settings.FillTransparency,
-			OutlineTransparency = Settings.OutlineTransparency,
-			Enabled = false,
-		})
+		Highlighter = Spec.Build(Settings, Target, Part, BoundsSize or Part.Size)
+	else
+		Highlighter = Spec.Build(Settings, Target)
 	end
 
 	self.UI.Highlighter = Highlighter
+	self._HighlighterClass = Highlighter ~= nil and Spec.Class or nil
+	self._HighlighterType = Highlighter ~= nil and Type or nil
+	self._HlFill = nil
+	self._HlOutline = nil
+	self._HlFillTransparency = nil
+	self._HlOutlineTransparency = nil
 end
 
 local function HighlighterMatchesType(Highlighter, Type)
@@ -1421,23 +2191,29 @@ local function HighlighterMatchesType(Highlighter, Type)
 		return false
 	end
 
-	if Type == "highlight" then
-		return Highlighter:IsA("Highlight")
-	elseif Type == "selectionbox" then
-		return Highlighter:IsA("SelectionBox")
-	elseif Type == "sphereadornment" then
-		return Highlighter:IsA("SphereHandleAdornment")
-	elseif Type == "cylinderadornment" then
-		return Highlighter:IsA("CylinderHandleAdornment")
-	elseif string.find(Type, "adornment") then
-		return Highlighter:IsA("BoxHandleAdornment")
+	local Spec = ESPTypes[Type]
+
+	if Spec == nil or Spec.ClassName == nil then
+		return true
 	end
 
-	return true
+	return Highlighter:IsA(Spec.ClassName)
 end
 
-function ESP:_CreateOverlay()
-	self.UI.Tracer = CreateTracerLine(OverlayRoot, "Tracer")
+function ESP:_EnsureTracer()
+	if self.UI.Tracer == nil then
+		self.UI.Tracer = CreateTracerLine(OverlayRoot, "Tracer")
+	end
+
+	return self.UI.Tracer
+end
+
+function ESP:_EnsureEdgeBeacon()
+	if self.UI.EdgeBeacon ~= nil then
+		return self.UI.EdgeBeacon
+	end
+
+	local Color = self.CurrentSettings.Color
 
 	local EdgeBeacon = New("Frame", {
 		Parent = OverlayRoot,
@@ -1462,7 +2238,7 @@ function ESP:_CreateOverlay()
 		Parent = BeaconIndicator,
 		Name = "ChevronTop",
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundColor3 = self.CurrentSettings.Color,
+		BackgroundColor3 = Color,
 		BorderSizePixel = 0,
 		ZIndex = 3,
 	})
@@ -1474,7 +2250,7 @@ function ESP:_CreateOverlay()
 		Parent = BeaconIndicator,
 		Name = "ChevronBottom",
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		BackgroundColor3 = self.CurrentSettings.Color,
+		BackgroundColor3 = Color,
 		BorderSizePixel = 0,
 		ZIndex = 3,
 	})
@@ -1493,7 +2269,7 @@ function ESP:_CreateOverlay()
 		Position = UDim2.fromOffset(44, 0),
 		Size = UDim2.fromOffset(140, 24),
 		Text = "",
-		TextColor3 = self.CurrentSettings.Color,
+		TextColor3 = Color,
 		TextStrokeColor3 = Color3.new(0, 0, 0),
 		TextStrokeTransparency = 0.35,
 		TextTruncate = Enum.TextTruncate.AtEnd,
@@ -1509,6 +2285,14 @@ function ESP:_CreateOverlay()
 		ChevronBottom = BeaconChevronBottom,
 		Label = BeaconLabel,
 	}
+
+	return self.UI.EdgeBeacon
+end
+
+function ESP:_EnsureBox2D()
+	if self.UI.Box ~= nil then
+		return self.UI.Box
+	end
 
 	local Box = New("Frame", {
 		Parent = OverlayRoot,
@@ -1536,31 +2320,72 @@ function ESP:_CreateOverlay()
 		Right = CreateLine(Box, "Right"),
 	}
 
-	self.UI.Box3D = {}
-	for Index = 1, #Box3DIndices do
-		self.UI.Box3D[Index] = CreateLine(OverlayRoot, "Box3D_" .. tostring(Index))
+	return Box
+end
+
+function ESP:_EnsureBox3D()
+	local Lines = self.UI.Box3D
+
+	if Lines ~= nil then
+		return Lines
 	end
 
-	self.UI.Skeleton = {}
-	for Index = 1, #SkeletonSegments.R15 do
-		self.UI.Skeleton[Index] = CreateLine(OverlayRoot, "Bone_" .. tostring(Index))
+	Lines = table.create(#Box3DIndices)
+
+	for Index = 1, #Box3DIndices do
+		Lines[Index] = CreateLine(OverlayRoot, "Box3D_" .. Index)
+	end
+
+	self.UI.Box3D = Lines
+	return Lines
+end
+
+function ESP:_EnsureSkeleton()
+	local Lines = self.UI.Skeleton
+
+	if Lines ~= nil then
+		return Lines
+	end
+
+	local Count = #SkeletonSegments.R15
+	Lines = table.create(Count)
+
+	for Index = 1, Count do
+		Lines[Index] = CreateLine(OverlayRoot, "Bone_" .. Index)
+	end
+
+	self.UI.Skeleton = Lines
+	return Lines
+end
+
+local OverlayParts = {
+	{ Key = "Tracer", Global = "Tracers", Ensure = "_EnsureTracer" },
+	
+	{ Key = "EdgeBeacon", Global = "EdgeBeacons", AltGlobal = "Arrows", Ensure = "_EnsureEdgeBeacon" },
+	{ Key = "Box2D", Global = "Boxes2D", Ensure = "_EnsureBox2D" },
+	{ Key = "Box3D", Global = "Boxes3D", Ensure = "_EnsureBox3D" },
+	{ Key = "Skeleton", Global = "Skeleton", Ensure = "_EnsureSkeleton" },
+}
+
+local ActiveOverlayKeys = table.create(#OverlayParts)
+local ActiveOverlayCount = 0
+
+function ESP:_CreateOverlay()
+	local Settings = self.CurrentSettings
+
+	for Index = 1, #OverlayParts do
+		local Part = OverlayParts[Index]
+		local Component = Settings[Part.Key]
+
+		if Component ~= nil and Component.Enabled == true then
+			self[Part.Ensure](self)
+		end
 	end
 end
 
 function ESP:_Create()
-	self:_CreateBillboard()
-	self:_CreateHighlighter()
-
-	local Settings = self.CurrentSettings
-	local NeedsOverlay = Settings.Tracer.Enabled == true
-		or Settings.EdgeBeacon.Enabled == true
-		or Settings.Box2D.Enabled == true
-		or Settings.Box3D.Enabled == true
-		or Settings.Skeleton.Enabled == true
-
-	if NeedsOverlay then
-		self:_CreateOverlay()
-	end
+	
+	
 end
 
 function ESP:_SetHighlighterVisible(Visible)
@@ -1570,7 +2395,7 @@ function ESP:_SetHighlighterVisible(Visible)
 		return
 	end
 
-	if Highlighter:IsA("Highlight") then
+	if self._HighlighterClass == HIGHLIGHT_CLASS_FILL then
 		SetHighlightConflictProtection(self, Visible == true)
 		SetProperty(Highlighter, "Enabled", Visible)
 	else
@@ -1608,23 +2433,37 @@ function ESP:_HideAll()
 		SetProperty(self.UI.Box, "Visible", false)
 	end
 
-	for _, Line in pairs(self.UI.Box3D or {}) do
-		SetProperty(Line, "Visible", false)
+	local Box3DLines = self.UI.Box3D
+
+	if Box3DLines ~= nil then
+		for _, Line in ipairs(Box3DLines) do
+			SetProperty(Line, "Visible", false)
+		end
 	end
 
-	for _, Line in pairs(self.UI.Skeleton or {}) do
-		SetProperty(Line, "Visible", false)
+	local SkeletonLines = self.UI.Skeleton
+
+	if SkeletonLines ~= nil then
+		for _, Line in ipairs(SkeletonLines) do
+			SetProperty(Line, "Visible", false)
+		end
 	end
 
-	if self._SkeletonState then
-		self._SkeletonState.VisibleCount = 0
+	local SkeletonState = self._SkeletonState
 
-		for _, LineState in pairs(self._SkeletonState.Lines or {}) do
-			LineState.Visible = false
-			LineState.TargetA = nil
-			LineState.TargetB = nil
-			LineState.CurrentA = nil
-			LineState.CurrentB = nil
+	if SkeletonState ~= nil then
+		SkeletonState.VisibleCount = 0
+
+		local LineStates = SkeletonState.Lines
+
+		if LineStates ~= nil then
+			for _, LineState in pairs(LineStates) do
+				LineState.Visible = false
+				LineState.TargetA = nil
+				LineState.TargetB = nil
+				LineState.CurrentA = nil
+				LineState.CurrentB = nil
+			end
 		end
 	end
 
@@ -1638,20 +2477,25 @@ function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 	local Billboard = self.UI.Billboard
 	local Label = self.UI.Label
 
-	if (Billboard == nil or Label == nil)
-		and Settings.Text == true
+	local Enabled = Settings.Text == true
 		and Settings.Billboard ~= false
 		and VeloESP.Settings.Billboards == true
-	then
+		and Visible
+		and TargetOnScreen
+		and Alpha > 0.01
+
+	if Billboard == nil or Label == nil then
+		if not Enabled then
+			return
+		end
+
 		self:_CreateBillboard()
 		Billboard = self.UI.Billboard
 		Label = self.UI.Label
-	end
 
-	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and Settings.Text == true and Settings.Billboard ~= false and VeloESP.Settings.Billboards == true
-
-	if Billboard == nil or Label == nil then
-		return
+		if Billboard == nil or Label == nil then
+			return
+		end
 	end
 
 	SetProperty(Billboard, "Enabled", Enabled)
@@ -1660,11 +2504,29 @@ function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 		return
 	end
 
-	local Name = tostring(Settings.Name or self.Target.Name)
-	local Text = Name
+	
+	
+	
+	local Name = Settings.Name
 
-	if Settings.Distance == true and VeloESP.Settings.Distance == true then
-		Text = string.format('%s\n<font size="11">[%d studs]</font>', Name, math.floor(Distance + 0.5))
+	if type(Name) ~= "string" then
+		Name = Name ~= nil and tostring(Name) or self.Target.Name
+	end
+
+	local ShowDistance = Settings.Distance == true and VeloESP.Settings.Distance == true
+	local Studs = ShowDistance and math.floor(Distance + 0.5) or -1
+	local Text = self._LabelText
+
+	if Text == nil or self._LabelName ~= Name or self._LabelStuds ~= Studs then
+		if ShowDistance then
+			Text = string.format('%s\n<font size="11">[%d studs]</font>', Name, Studs)
+		else
+			Text = Name
+		end
+
+		self._LabelText = Text
+		self._LabelName = Name
+		self._LabelStuds = Studs
 	end
 
 	local TextTarget = Settings.TextModel or Settings.Model
@@ -1674,13 +2536,40 @@ function ESP:_UpdateBillboard(Visible, TargetOnScreen, Distance, Alpha)
 		self._TextAdornee = Adornee
 	end
 	SetProperty(Billboard, "Adornee", Adornee)
-	SetProperty(Billboard, "StudsOffset", Settings.StudsOffset)
 	SetProperty(Label, "Text", Text)
-	SetProperty(Label, "TextColor3", self:_GetColor(Settings.Color))
-	SetProperty(Label, "TextTransparency", ApplyAlphaTransparency(Settings.TextTransparency, Alpha))
-	SetProperty(Label, "TextStrokeTransparency", ApplyAlphaTransparency(Settings.TextStrokeTransparency, Alpha))
-	SetProperty(Label, "Font", Settings.Font or VeloESP.Settings.Font)
-	SetProperty(Label, "TextSize", Settings.TextSize or VeloESP.Settings.TextSize)
+
+	
+	
+	
+	
+	local Color = self:_GetColor(Settings.Color)
+	local TextTransparency = ApplyAlphaTransparency(Settings.TextTransparency, Alpha)
+	local StrokeTransparency = ApplyAlphaTransparency(Settings.TextStrokeTransparency, Alpha)
+	local Font = Settings.Font or VeloESP.Settings.Font
+	local TextSize = Settings.TextSize or VeloESP.Settings.TextSize
+	local StudsOffset = Settings.StudsOffset
+
+	if self._BbColor ~= Color
+		or self._BbTextTransparency ~= TextTransparency
+		or self._BbStrokeTransparency ~= StrokeTransparency
+		or self._BbFont ~= Font
+		or self._BbTextSize ~= TextSize
+		or self._BbStudsOffset ~= StudsOffset
+	then
+		self._BbColor = Color
+		self._BbTextTransparency = TextTransparency
+		self._BbStrokeTransparency = StrokeTransparency
+		self._BbFont = Font
+		self._BbTextSize = TextSize
+		self._BbStudsOffset = StudsOffset
+
+		SetProperty(Billboard, "StudsOffset", StudsOffset)
+		SetProperty(Label, "TextColor3", Color)
+		SetProperty(Label, "TextTransparency", TextTransparency)
+		SetProperty(Label, "TextStrokeTransparency", StrokeTransparency)
+		SetProperty(Label, "Font", Font)
+		SetProperty(Label, "TextSize", TextSize)
+	end
 end
 
 function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
@@ -1688,26 +2577,43 @@ function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
 	local Highlighter = self.UI.Highlighter
 	local Type = Settings.ESPType
 
-	if Highlighter and not HighlighterMatchesType(Highlighter, Type) then
-		self:_SetHighlighterVisible(false)
-		Destroy(Highlighter)
-		self.UI.Highlighter = nil
-		Highlighter = nil
+	
+	
+	
+	if Highlighter ~= nil and self._HighlighterType ~= Type then
+		if HighlighterMatchesType(Highlighter, Type) then
+			self._HighlighterType = Type
+		else
+			self:_SetHighlighterVisible(false)
+
+			if self._HighlighterClass == HIGHLIGHT_CLASS_FILL then
+				ReleaseHighlight(Highlighter)
+			else
+				Destroy(Highlighter)
+			end
+
+			self.UI.Highlighter = nil
+			self._HighlighterType = nil
+			self._HighlighterClass = nil
+			Highlighter = nil
+		end
 	end
 
-	if Highlighter == nil
-		and Settings.Highlight ~= false
-		and Settings.ESPType ~= "text"
-		and VeloESP.Settings.Highlighters == true
-	then
-		self:_CreateHighlighter()
-		Highlighter = self.UI.Highlighter
-	end
-
-	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and VeloESP.Settings.Highlighters == true
+	local GlobalEnabled = VeloESP.Settings.Highlighters == true
+	local Enabled = Visible and TargetOnScreen and Alpha > 0.01
+		and GlobalEnabled and Settings.Highlight ~= false and Type ~= "text"
 
 	if Highlighter == nil then
-		return
+		if not Enabled then
+			return
+		end
+
+		self:_CreateHighlighter()
+		Highlighter = self.UI.Highlighter
+
+		if Highlighter == nil then
+			return
+		end
 	end
 
 	self:_SetHighlighterVisible(Enabled)
@@ -1716,36 +2622,62 @@ function ESP:_UpdateHighlighter(Visible, TargetOnScreen, Alpha)
 		return
 	end
 
+	local Class = self._HighlighterClass
+
+	if Class == HIGHLIGHT_CLASS_FILL then
+		SetProperty(Highlighter, "Adornee", Settings.Model)
+
+		
+		
+		local FillColor = self:_GetColor(Settings.FillColor)
+		local OutlineColor = self:_GetColor(Settings.OutlineColor)
+		local FillTransparency = ApplyAlphaTransparency(Settings.FillTransparency, Alpha)
+		local OutlineTransparency = ApplyAlphaTransparency(Settings.OutlineTransparency, Alpha)
+
+		if self._HlFill ~= FillColor
+			or self._HlOutline ~= OutlineColor
+			or self._HlFillTransparency ~= FillTransparency
+			or self._HlOutlineTransparency ~= OutlineTransparency
+		then
+			self._HlFill = FillColor
+			self._HlOutline = OutlineColor
+			self._HlFillTransparency = FillTransparency
+			self._HlOutlineTransparency = OutlineTransparency
+
+			SetProperty(Highlighter, "FillColor", FillColor)
+			SetProperty(Highlighter, "OutlineColor", OutlineColor)
+			SetProperty(Highlighter, "FillTransparency", FillTransparency)
+			SetProperty(Highlighter, "OutlineTransparency", OutlineTransparency)
+		end
+
+		return
+	end
+
 	local Color = self:_GetColor(Settings.Color)
 
-	if Highlighter:IsA("Highlight") then
-		SetProperty(Highlighter, "Adornee", Settings.Model)
-		SetProperty(Highlighter, "FillColor", self:_GetColor(Settings.FillColor))
-		SetProperty(Highlighter, "OutlineColor", self:_GetColor(Settings.OutlineColor))
-		SetProperty(Highlighter, "FillTransparency", ApplyAlphaTransparency(Settings.FillTransparency, Alpha))
-		SetProperty(Highlighter, "OutlineTransparency", ApplyAlphaTransparency(Settings.OutlineTransparency, Alpha))
-	elseif Highlighter:IsA("SelectionBox") then
+	if Class == HIGHLIGHT_CLASS_SELECTION then
 		SetProperty(Highlighter, "Adornee", Settings.Model)
 		SetProperty(Highlighter, "Color3", Color)
 		SetProperty(Highlighter, "LineThickness", Settings.Thickness)
 		SetProperty(Highlighter, "SurfaceColor3", Settings.SurfaceColor)
 		SetProperty(Highlighter, "SurfaceTransparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
-	else
-		local Part = GetPart(Settings.Model)
-		local _, Size = GetBounds(Settings.Model)
-		SetProperty(Highlighter, "Adornee", Part)
-		SetProperty(Highlighter, "Color3", Color)
-		SetProperty(Highlighter, "Transparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
+		return
+	end
 
-		if Size then
-			if Type == "sphereadornment" then
-				SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Y, Size.Z) * 0.62)
-			elseif Type == "cylinderadornment" then
-				SetProperty(Highlighter, "Height", Size.Y)
-				SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Z) * 0.55)
-			elseif Highlighter:IsA("BoxHandleAdornment") then
-				SetProperty(Highlighter, "Size", Size)
-			end
+	local Part = GetPart(Settings.Model)
+	local _, Size = GetBounds(Settings.Model)
+	SetProperty(Highlighter, "Adornee", Part)
+	SetProperty(Highlighter, "Color3", Color)
+	SetProperty(Highlighter, "Transparency", ApplyAlphaTransparency(Settings.Transparency, Alpha))
+
+	if Size then
+		if Class == HIGHLIGHT_CLASS_SPHERE then
+			SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Y, Size.Z) * 0.62)
+		elseif Class == HIGHLIGHT_CLASS_CYLINDER then
+			SetProperty(Highlighter, "Height", Size.Y)
+			SetProperty(Highlighter, "Radius", math.max(Size.X, Size.Z) * 0.55)
+		elseif Class == HIGHLIGHT_CLASS_BOX then
+			SetProperty(Highlighter, "Size", Size)
 		end
 	end
 end
@@ -1754,12 +2686,9 @@ function ESP:_UpdateBox2D(Visible, TargetOnScreen, Alpha, BoundsVisible, MinX, M
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box2D
 	local Box = self.UI.Box
-	if Box == nil then
-		return
-	end
 
 	if BoxSettings.Enabled ~= true or VeloESP.Settings.Boxes2D ~= true then
-		if Box.Visible then
+		if Box ~= nil and Box.Visible then
 			SetProperty(Box, "Visible", false)
 		end
 
@@ -1767,6 +2696,12 @@ function ESP:_UpdateBox2D(Visible, TargetOnScreen, Alpha, BoundsVisible, MinX, M
 	end
 
 	local Enabled = Visible and TargetOnScreen and Alpha > 0.01 and BoundsVisible
+	if Box == nil then
+		if not Enabled then
+			return
+		end
+		Box = self:_EnsureBox2D()
+	end
 
 	SetProperty(Box, "Visible", Enabled)
 
@@ -1807,10 +2742,6 @@ function ESP:_UpdateBox2D(Visible, TargetOnScreen, Alpha, BoundsVisible, MinX, M
 end
 
 function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
-	if self.UI.Box3D == nil then
-		return
-	end
-
 	local Settings = self.CurrentSettings
 	local BoxSettings = Settings.Box3D
 	local Enabled = Visible and Alpha > 0.01 and CornerOnScreen and BoxSettings.Enabled == true and VeloESP.Settings.Boxes3D == true
@@ -1819,10 +2750,21 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 		return
 	end
 
+	local Lines = self.UI.Box3D
+
+	if Lines == nil then
+		if not Enabled then
+			self._Box3DVisible = false
+			return
+		end
+
+		Lines = self:_EnsureBox3D()
+	end
+
 	self._Box3DVisible = Enabled
 
 	if not Enabled or ScreenCorners == nil then
-		for _, Line in ipairs(self.UI.Box3D or {}) do
+		for _, Line in ipairs(Lines) do
 			SetProperty(Line, "Visible", false)
 		end
 		return
@@ -1831,7 +2773,7 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	local Color = self:_GetColor(BoxSettings.Color)
 	local Transparency = ApplyAlphaTransparency(BoxSettings.Transparency, Alpha)
 
-	for Index, Line in ipairs(self.UI.Box3D or {}) do
+	for Index, Line in ipairs(Lines) do
 		local Pair = Box3DIndices[Index]
 		local PointA = Pair and ScreenCorners[Pair[1]]
 		local PointB = Pair and ScreenCorners[Pair[2]]
@@ -1852,26 +2794,37 @@ function ESP:_UpdateBox3D(Visible, Alpha, CornerOnScreen, ScreenCorners)
 	end
 end
 
-function ESP:_GetTracerOrigin()
-	local ActiveCamera = GetCamera()
+local TracerOrigins = {
+	top = function(Viewport)
+		return Vector2.new(Viewport.X / 2, 0)
+	end,
+	center = function(Viewport)
+		return Vector2.new(Viewport.X / 2, Viewport.Y / 2)
+	end,
+	bottom = function(Viewport)
+		return Vector2.new(Viewport.X / 2, Viewport.Y)
+	end,
+	mouse = function()
+		local Mouse = UserInputService:GetMouseLocation()
+		return Vector2.new(Mouse.X, Mouse.Y)
+	end,
+}
 
-	if ActiveCamera == nil then
+function ESP:_GetTracerOrigin()
+	local Viewport = GetViewportSize()
+
+	if Viewport == nil then
 		return Vector2.zero
 	end
 
-	local Viewport = ActiveCamera.ViewportSize
-	local From = string.lower(tostring(self.CurrentSettings.Tracer.From or "bottom"))
+	local From = self.CurrentSettings.Tracer.From
+	local Origin = type(From) == "string" and TracerOrigins[From] or nil
 
-	if From == "top" then
-		return Vector2.new(Viewport.X / 2, 0)
-	elseif From == "center" then
-		return Vector2.new(Viewport.X / 2, Viewport.Y / 2)
-	elseif From == "mouse" then
-		local Mouse = UserInputService:GetMouseLocation()
-		return Vector2.new(Mouse.X, Mouse.Y)
+	if Origin == nil then
+		Origin = TracerOrigins.bottom
 	end
 
-	return Vector2.new(Viewport.X / 2, Viewport.Y)
+	return Origin(Viewport)
 end
 
 function ESP:_RefreshSmoothOverlayRegistration()
@@ -1895,7 +2848,7 @@ function ESP:_RefreshSmoothOverlayRegistration()
 	end
 end
 
-function ESP:_RenderTracer(DeltaTime)
+function ESP:_RenderTracer(DeltaTime, ProjectedPosition)
 	local Tracer = self.UI.Tracer
 	local State = self._TracerState
 
@@ -1910,10 +2863,18 @@ function ESP:_RenderTracer(DeltaTime)
 	local Model = self.CurrentSettings and self.CurrentSettings.Model
 
 	if typeof(Model) == "Instance" and Model.Parent ~= nil then
-		local CFrame = GetCFrame(Model)
+		local ScreenPosition = ProjectedPosition
+		if ScreenPosition == nil and self._ProjectionFrame == Screen.Frame and self._ProjectionModel == Model then
+			ScreenPosition = self._LastScreenPosition
+		end
+		if ScreenPosition == nil then
+			local CFrame = GetCFrame(Model)
+			if CFrame ~= nil then
+				ScreenPosition = WorldToViewport(CFrame.Position)
+			end
+		end
 
-		if CFrame ~= nil then
-			local ScreenPosition = WorldToViewport(CFrame.Position)
+		if ScreenPosition ~= nil then
 
 			if ScreenPosition.Z > 0 then
 				State.TargetTo = Vector2.new(ScreenPosition.X, ScreenPosition.Y)
@@ -1930,6 +2891,7 @@ function ESP:_RenderTracer(DeltaTime)
 
 	SetProperty(Tracer, "Visible", true)
 	self.UI.Tracer = UpdateTracerLine(Tracer, State.CurrentFrom, State.CurrentTo, State.Thickness, State.Color, State.Transparency)
+	State.PresentedFrame = Screen.Frame
 
 	return true
 end
@@ -1943,6 +2905,7 @@ function ESP:_RenderSkeleton(DeltaTime)
 	end
 
 	local AnyVisible = false
+	local SmoothingAlpha = Util.GetSmoothingAlpha(State.Smoothness, DeltaTime)
 
 	for Index, Line in ipairs(Lines) do
 		local LineState = State.Lines and State.Lines[Index]
@@ -1954,8 +2917,16 @@ function ESP:_RenderSkeleton(DeltaTime)
 		SetProperty(Line, "Visible", ShowLine == true)
 
 		if ShowLine then
-			LineState.CurrentA = SmoothVector2(LineState.CurrentA, LineState.TargetA, State.Smoothness, DeltaTime)
-			LineState.CurrentB = SmoothVector2(LineState.CurrentB, LineState.TargetB, State.Smoothness, DeltaTime)
+			if LineState.CurrentA == nil or SmoothingAlpha >= 1 then
+				LineState.CurrentA = LineState.TargetA
+			else
+				LineState.CurrentA += (LineState.TargetA - LineState.CurrentA) * SmoothingAlpha
+			end
+			if LineState.CurrentB == nil or SmoothingAlpha >= 1 then
+				LineState.CurrentB = LineState.TargetB
+			else
+				LineState.CurrentB += (LineState.TargetB - LineState.CurrentB) * SmoothingAlpha
+			end
 			SetProperty(Line, "BackgroundColor3", State.Color)
 			SetProperty(Line, "BackgroundTransparency", State.Transparency)
 			UpdateLine(Line, LineState.CurrentA, LineState.CurrentB, State.Thickness)
@@ -1975,8 +2946,10 @@ function ESP:_PresentOverlays(DeltaTime)
 	local Active = false
 	local TracerState = self._TracerState
 
-	if TracerState and TracerState.Visible == true then
+	if TracerState and TracerState.Visible == true and TracerState.PresentedFrame ~= Screen.Frame then
 		Active = self:_RenderTracer(DeltaTime) or Active
+	elseif TracerState and TracerState.Visible == true then
+		Active = true
 	end
 
 	local SkeletonState = self._SkeletonState
@@ -1996,13 +2969,20 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	local Enabled = Visible and OnScreen and Alpha > 0.01 and Settings.Enabled == true and VeloESP.Settings.Tracers == true
 
 	if Tracer == nil then
-		if self._TracerState then
-			self._TracerState.Visible = false
-			self._TracerState.TargetTo = nil
+		if not Enabled then
+			local State = self._TracerState
+
+			if State == nil then
+				return
+			end
+
+			State.Visible = false
+			State.TargetTo = nil
+			self:_RefreshSmoothOverlayRegistration()
+			return
 		end
 
-		self:_RefreshSmoothOverlayRegistration()
-		return
+		Tracer = self:_EnsureTracer()
 	end
 
 	if not Enabled then
@@ -2031,7 +3011,7 @@ function ESP:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 	if State.Smoothness <= 0 then
 		State.CurrentFrom = self:_GetTracerOrigin()
 		State.CurrentTo = State.TargetTo
-		self:_RenderTracer(0)
+		self:_RenderTracer(0, ScreenPosition)
 	end
 
 	self:_RefreshSmoothOverlayRegistration()
@@ -2040,10 +3020,21 @@ end
 function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alpha)
 	local Beacon = self.UI.EdgeBeacon
 	local Settings = self.CurrentSettings.EdgeBeacon
-	local GlobalEnabled = VeloESP.Settings.EdgeBeacons == true or VeloESP.Settings.Arrows == true
-	local Enabled = Visible and Alpha > 0.01 and not OnScreen and Settings.Enabled == true and GlobalEnabled
+	local Enabled = Settings.Enabled == true
+		and Visible
+		and Alpha > 0.01
+		and not OnScreen
+		and (VeloESP.Settings.EdgeBeacons == true or VeloESP.Settings.Arrows == true)
 
-	if Beacon == nil or Beacon.Root == nil then
+	if Beacon == nil then
+		if not Enabled then
+			return
+		end
+
+		Beacon = self:_EnsureEdgeBeacon()
+	end
+
+	if Beacon.Root == nil then
 		return
 	end
 
@@ -2053,14 +3044,13 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 		return
 	end
 
-	local ActiveCamera = GetCamera()
+	local Viewport = GetViewportSize()
 
-	if ActiveCamera == nil then
+	if Viewport == nil then
 		SetProperty(Beacon.Root, "Visible", false)
 		return
 	end
 
-	local Viewport = ActiveCamera.ViewportSize
 	local Center = Vector2.new(Viewport.X / 2, Viewport.Y / 2)
 	local Direction = Vector2.new(ScreenPosition.X, ScreenPosition.Y) - Center
 
@@ -2099,16 +3089,30 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	local TopY = ArrowSize * 0.08
 	local MiddleY = ArrowSize * 0.5
 	local BottomY = ArrowSize * 0.92
-	local Name = tostring(self.CurrentSettings.Name or self.Target.Name)
-	local LabelText = Name
+	local Name = self.CurrentSettings.Name or self.Target.Name
+	if type(Name) ~= "string" then
+		Name = tostring(Name)
+	end
 	local ShowDistance = Settings.Distance == true and VeloESP.Settings.Distance == true
-
-	if ShowDistance then
-		LabelText = string.format("%s  ·  %d studs", Name, math.floor(Distance + 0.5))
+	local Studs = ShowDistance and math.floor(Distance + 0.5) or -1
+	local LabelText = self._BeaconText
+	if LabelText == nil or self._BeaconName ~= Name or self._BeaconStuds ~= Studs then
+		LabelText = ShowDistance and string.format("%s  ·  %d studs", Name, Studs) or Name
+		self._BeaconText = LabelText
+		self._BeaconName = Name
+		self._BeaconStuds = Studs
 	end
 
 	local LabelFont = Settings.Font or VeloESP.Settings.Font or Enum.Font.Oswald
-	local TextBounds = MeasureText(LabelText, Settings.TextSize, LabelFont)
+	local TextBounds = self._BeaconTextBounds
+	if TextBounds == nil or self._BeaconMeasuredText ~= LabelText
+		or self._BeaconFont ~= LabelFont or self._BeaconTextSize ~= Settings.TextSize then
+		TextBounds = MeasureText(LabelText, Settings.TextSize, LabelFont)
+		self._BeaconTextBounds = TextBounds
+		self._BeaconMeasuredText = LabelText
+		self._BeaconFont = LabelFont
+		self._BeaconTextSize = Settings.TextSize
+	end
 	local LabelWidth = math.clamp(math.ceil(TextBounds.X) + 8, 24, math.max(24, math.min(260, Viewport.X - 8)))
 	local LabelHeight = math.min(math.ceil(TextBounds.Y) + 2, math.max(1, Viewport.Y - 8))
 	local Axis
@@ -2134,10 +3138,14 @@ function ESP:_UpdateEdgeBeacon(Visible, OnScreen, ScreenPosition, Distance, Alph
 	LabelOffset = Vector2.new(math.floor(LabelOffset.X + 0.5), math.floor(LabelOffset.Y + 0.5))
 
 	SetProperty(Beacon.Root, "Position", UDim2.fromOffset(Position.X, Position.Y))
-	SetProperty(Beacon.Indicator, "Size", UDim2.fromOffset(ArrowSize, ArrowSize))
 	SetProperty(Beacon.Indicator, "Rotation", math.deg(math.atan2(Direction.Y, Direction.X)))
-	UpdateLine(Beacon.ChevronTop, Vector2.new(BaseX, TopY), Vector2.new(TipX, MiddleY), Thickness)
-	UpdateLine(Beacon.ChevronBottom, Vector2.new(TipX, MiddleY), Vector2.new(BaseX, BottomY), Thickness)
+	if self._BeaconArrowSize ~= ArrowSize or self._BeaconThickness ~= Thickness then
+		self._BeaconArrowSize = ArrowSize
+		self._BeaconThickness = Thickness
+		SetProperty(Beacon.Indicator, "Size", UDim2.fromOffset(ArrowSize, ArrowSize))
+		UpdateLine(Beacon.ChevronTop, Vector2.new(BaseX, TopY), Vector2.new(TipX, MiddleY), Thickness)
+		UpdateLine(Beacon.ChevronBottom, Vector2.new(TipX, MiddleY), Vector2.new(BaseX, BottomY), Thickness)
+	end
 	SetProperty(Beacon.ChevronTop, "BackgroundColor3", Color)
 	SetProperty(Beacon.ChevronTop, "BackgroundTransparency", Transparency)
 	SetProperty(Beacon.ChevronBottom, "BackgroundColor3", Color)
@@ -2194,6 +3202,7 @@ function ESP:_GetSkeletonCache()
 		RigType = RigType,
 		Segments = Segments,
 		Parts = Parts,
+		Projected = {},
 	}
 	self._SkeletonCache = Cache
 
@@ -2201,25 +3210,32 @@ function ESP:_GetSkeletonCache()
 end
 
 function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
-	if self.UI.Skeleton == nil then
-		if self._SkeletonState then
-			self._SkeletonState.VisibleCount = 0
-			self:_RefreshSmoothOverlayRegistration()
-		end
-
-		return
-	end
-
 	local Settings = self.CurrentSettings
 	local SkeletonSettings = Settings.Skeleton
-	local Lines = self.UI.Skeleton or {}
-	local Enabled = Visible
+	local Enabled = SkeletonSettings.Enabled == true
+		and Visible
 		and OnScreen
 		and Alpha > 0.01
-		and SkeletonSettings.Enabled == true
 		and VeloESP.Settings.Skeleton == true
 		and typeof(Settings.Model) == "Instance"
-		and Settings.Model:IsA("Model")
+		and GetKind(Settings.Model) == KIND_MODEL
+
+	local Lines = self.UI.Skeleton
+
+	if Lines == nil then
+		if not Enabled then
+			local State = self._SkeletonState
+
+			if State ~= nil then
+				State.VisibleCount = 0
+				self:_RefreshSmoothOverlayRegistration()
+			end
+
+			return
+		end
+
+		Lines = self:_EnsureSkeleton()
+	end
 
 	if not Enabled then
 		if self._SkeletonVisible ~= true then
@@ -2239,15 +3255,19 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 		local State = self._SkeletonState
 
-		if State then
+		if State ~= nil then
 			State.VisibleCount = 0
 
-			for _, LineState in pairs(State.Lines or {}) do
-				LineState.Visible = false
-				LineState.TargetA = nil
-				LineState.TargetB = nil
-				LineState.CurrentA = nil
-				LineState.CurrentB = nil
+			local LineStates = State.Lines
+
+			if LineStates ~= nil then
+				for _, LineState in pairs(LineStates) do
+					LineState.Visible = false
+					LineState.TargetA = nil
+					LineState.TargetB = nil
+					LineState.CurrentA = nil
+					LineState.CurrentB = nil
+				end
 			end
 		end
 
@@ -2296,6 +3316,8 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 	State.Smoothness = SkeletonSettings.Smoothness
 
 	local VisibleCount = 0
+	local Projected = Cache.Projected
+	table.clear(Projected)
 
 	for Index, Line in ipairs(Lines) do
 		local Segment = Cache.Segments[Index]
@@ -2318,7 +3340,18 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 		local Parts = Cache.Parts[Index]
 
-		if Parts == nil or Parts[1].Parent == nil or Parts[2].Parent == nil then
+		if Parts == nil or Parts[1].Parent ~= Settings.Model or Parts[2].Parent ~= Settings.Model then
+			local First = Settings.Model:FindFirstChild(Segment[1])
+			local Second = Settings.Model:FindFirstChild(Segment[2])
+			if First and Second and GetKind(First) == KIND_PART and GetKind(Second) == KIND_PART then
+				Parts = { First, Second }
+				Cache.Parts[Index] = Parts
+			else
+				Parts = nil
+				Cache.Parts[Index] = nil
+			end
+		end
+		if Parts == nil then
 			SetProperty(Line, "Visible", false)
 			LineState.Visible = false
 			LineState.TargetA = nil
@@ -2330,8 +3363,18 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 
 		local First = Parts[1]
 		local Second = Parts[2]
-		local PointA = WorldToViewport(First.Position)
-		local PointB = WorldToViewport(Second.Position)
+		
+		
+		local PointA = Projected[First]
+		if PointA == nil then
+			PointA = WorldToViewport(First.Position)
+			Projected[First] = PointA
+		end
+		local PointB = Projected[Second]
+		if PointB == nil then
+			PointB = WorldToViewport(Second.Position)
+			Projected[Second] = PointB
+		end
 		local ShowLine = PointA.Z > 0 and PointB.Z > 0
 		LineState.Visible = ShowLine == true
 
@@ -2358,15 +3401,55 @@ function ESP:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
 	self:_RefreshSmoothOverlayRegistration()
 end
 
-function ESP:_GetUpdateRate(Distance)
-	local Settings = self.CurrentSettings
-	local Realtime = (Settings.Tracer.Enabled == true and VeloESP.Settings.Tracers == true)
-		or (Settings.EdgeBeacon.Enabled == true and VeloESP.Settings.EdgeBeacons == true)
-		or (Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
-		or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
-		or (Settings.Skeleton.Enabled == true and VeloESP.Settings.Skeleton == true)
+local function RefreshActiveOverlays()
+	local Settings = VeloESP.Settings
+	local Count = 0
 
-	if Realtime then
+	for Index = 1, #OverlayParts do
+		local Part = OverlayParts[Index]
+
+		if Settings[Part.Global] == true or (Part.AltGlobal ~= nil and Settings[Part.AltGlobal] == true) then
+			Count += 1
+			ActiveOverlayKeys[Count] = Part.Key
+		end
+	end
+
+	for Index = Count + 1, ActiveOverlayCount do
+		ActiveOverlayKeys[Index] = nil
+	end
+
+	ActiveOverlayCount = Count
+	return Count > 0
+end
+
+VeloESP._AnyOverlay = RefreshActiveOverlays()
+
+function ESP:_NeedsScreenOverlays()
+	local Count = ActiveOverlayCount
+
+	if Count == 0 then
+		return false
+	end
+
+	local Settings = self.CurrentSettings
+
+	for Index = 1, Count do
+		local Component = Settings[ActiveOverlayKeys[Index]]
+
+		if Component ~= nil and Component.Enabled == true then
+			return true
+		end
+	end
+
+	return false
+end
+
+function ESP:_GetUpdateRate(Distance, NeedsOverlays)
+	if NeedsOverlays == nil then
+		NeedsOverlays = self:_NeedsScreenOverlays()
+	end
+
+	if NeedsOverlays or VeloESP._AnyRateLimit == false then
 		return 0
 	end
 
@@ -2400,6 +3483,9 @@ function ESP:_Update(DeltaTime)
 	end
 
 	DeltaTime = DeltaTime or 1 / 60
+	
+	
+	Geometry.BoundsTarget = nil
 
 	local Settings = self.CurrentSettings
 
@@ -2410,8 +3496,14 @@ function ESP:_Update(DeltaTime)
 
 	self._UpdateElapsed = (self._UpdateElapsed or 0) + DeltaTime
 
-	if self._LastDistance ~= nil and Settings.Fade.Enabled ~= true then
-		local CachedRate = self:_GetUpdateRate(self._LastDistance)
+	
+	
+	
+	local NeedsOverlays = ActiveOverlayCount > 0 and self:_NeedsScreenOverlays() or false
+	local RateLimited = NeedsOverlays == false and VeloESP._AnyRateLimit ~= false
+
+	if RateLimited and self._LastDistance ~= nil and Settings.Fade.Enabled ~= true then
+		local CachedRate = self:_GetUpdateRate(self._LastDistance, NeedsOverlays)
 		if CachedRate > 0 and self._UpdateElapsed < CachedRate then
 			return
 		end
@@ -2424,11 +3516,11 @@ function ESP:_Update(DeltaTime)
 		return
 	end
 
-	local ActiveCamera = GetCamera()
+	local CameraPosition = GetCameraPosition()
 	local Distance = math.huge
 
-	if ActiveCamera then
-		Distance = (CFrame.Position - ActiveCamera.CFrame.Position).Magnitude
+	if CameraPosition then
+		Distance = (CFrame.Position - CameraPosition).Magnitude
 	end
 
 	local BaseVisible = VeloESP.Settings.Enabled == true
@@ -2436,11 +3528,17 @@ function ESP:_Update(DeltaTime)
 		and Settings.Visible ~= false
 		and Distance <= Settings.MaxDistance
 	local TargetAlpha = self:_GetFadeTarget(BaseVisible, Distance)
-	local UpdateRate = self:_GetUpdateRate(Distance)
-	local IsFading = math.abs((self._Alpha or TargetAlpha) - TargetAlpha) > 0.01
 
-	if UpdateRate > 0 and self._UpdateElapsed < UpdateRate and IsFading ~= true then
-		return
+	if RateLimited then
+		local UpdateRate = self:_GetUpdateRate(Distance, NeedsOverlays)
+
+		if UpdateRate > 0 and self._UpdateElapsed < UpdateRate then
+			local IsFading = math.abs((self._Alpha or TargetAlpha) - TargetAlpha) > 0.01
+
+			if IsFading ~= true then
+				return
+			end
+		end
 	end
 
 	self._UpdateElapsed = 0
@@ -2453,14 +3551,13 @@ function ESP:_Update(DeltaTime)
 
 	if Visible ~= true then
 		self:_HideAll()
+		if self.Hidden == true or Settings.Visible == false then
+			RemoveUpdateObject(self)
+		end
 		return
 	end
 
-	local NeedsProjection = (Settings.Tracer.Enabled == true and VeloESP.Settings.Tracers == true)
-		or (Settings.EdgeBeacon.Enabled == true and VeloESP.Settings.EdgeBeacons == true)
-		or (Settings.Box2D.Enabled == true and VeloESP.Settings.Boxes2D == true)
-		or (Settings.Box3D.Enabled == true and VeloESP.Settings.Boxes3D == true)
-		or (Settings.Skeleton.Enabled == true and VeloESP.Settings.Skeleton == true)
+	local NeedsProjection = NeedsOverlays
 
 	local ScreenPosition = self._LastScreenPosition
 	local OnScreen = true
@@ -2490,11 +3587,18 @@ function ESP:_Update(DeltaTime)
 
 		self._ScreenCorners = ScreenCorners
 		self._LastScreenPosition = ScreenPosition
+		self._ProjectionFrame = Screen.Frame
+		self._ProjectionModel = Settings.Model
 		self._OnScreen = OnScreen
 		self._BoundsVisible = BoundsVisible
 
 		if Settings.BeforeUpdate then
 			SafeCall(Settings.BeforeUpdate, self)
+			if self.Destroyed then
+				return
+			end
+			Geometry.BoundsTarget = nil
+			self._ProjectionFrame = nil
 		end
 
 		self._AllHidden = false
@@ -2506,39 +3610,60 @@ function ESP:_Update(DeltaTime)
 		self:_UpdateTracer(Visible, OnScreen, ScreenPosition, Alpha)
 		self:_UpdateEdgeBeacon(Visible, BoundsVisible, ScreenPosition, Distance, Alpha)
 		self:_UpdateSkeleton(Visible, OnScreen, Alpha, DeltaTime)
+		self._OverlaysDirty = true
 	else
 		self._OnScreen = true
 		self._BoundsVisible = true
 
 		if Settings.BeforeUpdate then
 			SafeCall(Settings.BeforeUpdate, self)
+			if self.Destroyed then
+				return
+			end
+			Geometry.BoundsTarget = nil
 		end
 
 		self._AllHidden = false
 
 		self:_UpdateBillboard(Visible, true, Distance, Alpha)
 		self:_UpdateHighlighter(Visible, true, Alpha)
-		self:_UpdateBox2D(Visible, false, Alpha, false, 0, 0, 0, 0)
-		self:_UpdateBox3D(Visible, Alpha, false, ScreenCorners)
-		self:_UpdateTracer(Visible, false, ScreenPosition, Alpha)
-		self:_UpdateEdgeBeacon(Visible, false, ScreenPosition, Distance, Alpha)
-		self:_UpdateSkeleton(Visible, false, Alpha, DeltaTime)
+
+		
+		
+		
+		if self._OverlaysDirty ~= false then
+			self:_UpdateBox2D(Visible, false, Alpha, false, 0, 0, 0, 0)
+			self:_UpdateBox3D(Visible, Alpha, false, ScreenCorners)
+			self:_UpdateTracer(Visible, false, ScreenPosition, Alpha)
+			self:_UpdateEdgeBeacon(Visible, false, ScreenPosition, Distance, Alpha)
+			self:_UpdateSkeleton(Visible, false, Alpha, DeltaTime)
+			self._OverlaysDirty = false
+		end
 	end
 
 	if Settings.AfterUpdate then
 		SafeCall(Settings.AfterUpdate, self)
+		self._ProjectionFrame = nil
 	end
+	Geometry.BoundsTarget = nil
 end
 
 function ESP:Set(Options)
 	assert(typeof(Options) == "table", "Argument #1 must be a table.")
 
+	self._OverlaysDirty = true
 	Merge(self.CurrentSettings, Options)
 	self.CurrentSettings = NormalizeOptions(self.Target, self.CurrentSettings)
 	self.Options = self.CurrentSettings
+	self:_BindModelWatch()
 
 	if self.Hidden == true or self.CurrentSettings.Visible == false then
-		RemoveUpdateObject(self)
+		if self.CurrentSettings.Fade.Enabled == true and self._Alpha > 0.01 then
+			AddUpdateObject(self)
+		else
+			self:_HideAll()
+			RemoveUpdateObject(self)
+		end
 	else
 		AddUpdateObject(self)
 	end
@@ -2559,19 +3684,12 @@ function ESP:Set(Options)
 		SetProperty(self.UI.Tracer, "Visible", false)
 	end
 
-	for _, Line in pairs(self.UI.Skeleton or {}) do
-		SetProperty(Line, "Visible", false)
-	end
+	local SkeletonLines = self.UI.Skeleton
 
-	local Settings = self.CurrentSettings
-	local NeedsOverlay = Settings.Tracer.Enabled == true
-		or Settings.EdgeBeacon.Enabled == true
-		or Settings.Box2D.Enabled == true
-		or Settings.Box3D.Enabled == true
-		or Settings.Skeleton.Enabled == true
-
-	if NeedsOverlay and self.UI.Tracer == nil then
-		self:_CreateOverlay()
+	if SkeletonLines ~= nil then
+		for _, Line in ipairs(SkeletonLines) do
+			SetProperty(Line, "Visible", false)
+		end
 	end
 
 	return self
@@ -2579,6 +3697,7 @@ end
 
 function ESP:Show()
 	self.Hidden = false
+	self._OverlaysDirty = true
 	self.CurrentSettings.Visible = true
 	AddUpdateObject(self)
 	return self
@@ -2587,10 +3706,11 @@ end
 function ESP:Hide()
 	self.Hidden = true
 	self.CurrentSettings.Visible = false
-	RemoveUpdateObject(self)
-
-	if self.CurrentSettings.Fade.Enabled ~= true then
+	if self.CurrentSettings.Fade.Enabled == true and self._Alpha > 0.01 then
+		AddUpdateObject(self)
+	else
 		self:_HideAll()
+		RemoveUpdateObject(self)
 	end
 
 	return self
@@ -2631,10 +3751,20 @@ function ESP:Destroy()
 	end
 
 	self.Destroyed = true
+	if Geometry.BoundsTarget == self.CurrentSettings.Model then
+		Geometry.BoundsTarget = nil
+	end
 	self.Deleted = true
 	VeloESP._SmoothObjects[self] = nil
 	RemoveUpdateObject(self)
 	SetHighlightConflictProtection(self, false)
+
+	if self._ModelWatch then
+		self._ModelWatch:Disconnect()
+		self._ModelWatch = nil
+	end
+
+	self._WatchedModel = nil
 
 	if self.OriginalSettings.OnDestroy then
 		SafeCall(self.OriginalSettings.OnDestroy.Fire, self.OriginalSettings.OnDestroy)
@@ -2644,7 +3774,25 @@ function ESP:Destroy()
 		SafeCall(self.OriginalSettings.OnDestroyFunc, self)
 	end
 
-	for _, Object in pairs(self.UI) do
+	
+	
+	local UI = self.UI
+
+	if self._HighlighterClass == HIGHLIGHT_CLASS_FILL and UI.Highlighter ~= nil then
+		ReleaseHighlight(UI.Highlighter)
+		UI.Highlighter = nil
+	end
+
+	if UI.Billboard ~= nil then
+		ReleaseBillboard(UI.Billboard, UI.Label)
+		UI.Billboard = nil
+		UI.Label = nil
+	end
+
+	self._HighlighterClass = nil
+	self._HighlighterType = nil
+
+	for _, Object in pairs(UI) do
 		if typeof(Object) == "Instance" then
 			Destroy(Object)
 		elseif typeof(Object) == "table" then
@@ -2697,7 +3845,7 @@ function VeloESP.new(Target, Options)
 	end
 
 	local Object = setmetatable({
-		Index = Target.Name .. "_" .. tostring(math.random(100000, 999999)),
+		Index = Target.Name .. "_" .. math.random(100000, 999999),
 		Target = Target,
 		Hidden = false,
 		Destroyed = false,
@@ -2705,8 +3853,11 @@ function VeloESP.new(Target, Options)
 		_Alpha = StartAlpha,
 		_Seed = math.random(),
 		_UpdateElapsed = 0,
-		_ScreenCorners = table.create(8),
-		OriginalSettings = DeepCopy(Settings),
+		_LastUpdateTime = VeloESP._Elapsed,
+		
+		
+		
+		OriginalSettings = CloneTemplate(Settings, ComponentKeys),
 		CurrentSettings = Settings,
 		Options = Settings,
 		UI = {},
@@ -2715,10 +3866,18 @@ function VeloESP.new(Target, Options)
 	VeloESP._Objects[Target] = Object
 	Object._ListIndex = #VeloESP._ObjectList + 1
 	VeloESP._ObjectList[Object._ListIndex] = Object
-	AddUpdateObject(Object)
+	if Settings.Visible ~= false then
+		AddUpdateObject(Object)
+	end
 
-	Object:_Create()
-	Object:_Update()
+	Object:_BindModelWatch()
+	if Settings.DeferredCreation ~= true then
+		
+		
+		Screen.CameraPosition = nil
+		Screen.ViewportSize = nil
+		Object:_Update()
+	end
 
 	return Object
 end
@@ -2771,6 +3930,23 @@ end
 
 local Watcher = {}
 Watcher.__index = Watcher
+
+local function SettingsMatch(Current, Proposed)
+	for Key, Value in pairs(Proposed) do
+		local Existing = Current[Key]
+		if (Key == "ESPType" or Key == "From") and type(Value) == "string" then
+			Value = string.lower(Value)
+		end
+		if type(Value) == "table" and type(Existing) == "table" then
+			if not SettingsMatch(Existing, Value) then
+				return false
+			end
+		elseif Existing ~= Value then
+			return false
+		end
+	end
+	return true
+end
 
 local function MatchesRule(Rule, Object)
 	local Match = Rule.Match
@@ -2826,8 +4002,10 @@ function Watcher:_ShouldShow(Object)
 	return Resolve(self.Rule.Visible, Object, false) == true
 end
 
-function Watcher:_RemoveObject(Object)
-	self.Objects[Object] = nil
+function Watcher:_RemoveObject(Object, KeepTracked)
+	if KeepTracked ~= true then
+		self.Objects[Object] = nil
+	end
 
 	local Handle = self.Handles[Object]
 	if Handle then
@@ -2854,7 +4032,7 @@ function Watcher:_UpdateObject(Object)
 	self.Objects[Object] = true
 
 	if not self:_ShouldShow(Object) then
-		self:_RemoveObject(Object)
+		self:_RemoveObject(Object, true)
 		return
 	end
 
@@ -2862,7 +4040,9 @@ function Watcher:_UpdateObject(Object)
 	local Handle = self.Handles[Object]
 
 	if Handle and Handle.Destroyed ~= true then
-		Handle:Set(Options)
+		if not SettingsMatch(Handle.CurrentSettings, Options) then
+			Handle:Set(Options)
+		end
 	else
 		self.Handles[Object] = VeloESP.new(Object, Options)
 	end
@@ -2885,13 +4065,7 @@ function Watcher:_Scan()
 end
 
 function Watcher:_Refresh()
-	local Objects = {}
-
 	for Object in pairs(self.Objects) do
-		table.insert(Objects, Object)
-	end
-
-	for _, Object in ipairs(Objects) do
 		self:_UpdateObject(Object)
 	end
 end
@@ -2943,6 +4117,7 @@ function Watcher:Destroy()
 	end
 
 	self.Destroyed = true
+	RemoveWatcher(self)
 
 	for _, Connection in ipairs(self.Connections) do
 		if Connection and Connection.Connected then
@@ -2973,8 +4148,8 @@ function VeloESP.watch(RootObject, Rule)
 		Rule = ShallowCopy(Rule),
 		Enabled = Rule.Enabled ~= false,
 		Destroyed = false,
-		Objects = setmetatable({}, { __mode = "k" }),
-		Handles = setmetatable({}, { __mode = "k" }),
+		Objects = WeakTable(),
+		Handles = WeakTable(),
 		Connections = {},
 		Elapsed = 0,
 		Interval = tonumber(Rule.Interval) or 0.15,
@@ -3013,7 +4188,7 @@ function VeloESP.watch(RootObject, Rule)
 		Object:_Scan()
 	end
 
-	table.insert(VeloESP._Watchers, Object)
+	RegisterWatcher(Object)
 	return Object
 end
 
@@ -3059,11 +4234,9 @@ function GeneratedObserver:_Enqueue(Object, IsScan)
 	self.Queued[Object] = true
 
 	if IsScan == true then
-		self.ScanQueueTail += 1
-		self.ScanQueue[self.ScanQueueTail] = Object
+		self.ScanQueue:Push(Object)
 	else
-		self.QueueTail += 1
-		self.Queue[self.QueueTail] = Object
+		self.LiveQueue:Push(Object)
 	end
 end
 
@@ -3072,7 +4245,8 @@ function GeneratedObserver:_ProcessObject(Object)
 		return
 	end
 
-	if not (Object and Object.Parent) then
+	if not (Object and Object.Parent)
+		or (Object ~= self.Root and not Object:IsDescendantOf(self.Root)) then
 		return
 	end
 
@@ -3085,6 +4259,9 @@ function GeneratedObserver:_ProcessObject(Object)
 	if typeof(Options.OnAdded) == "function" then
 		SafeCall(Options.OnAdded, Object, self)
 	end
+	if self.Destroyed or self.Enabled ~= true then
+		return
+	end
 
 	if typeof(Options.BuildOptions) == "function" then
 		local ESPOptions = SafeCall(Options.BuildOptions, Object, self)
@@ -3094,7 +4271,17 @@ function GeneratedObserver:_ProcessObject(Object)
 			ESPOptions.Object = nil
 
 			if typeof(ESPOptions.Model) == "Instance" then
-				self.Handles[Object] = VeloESP.Add(ESPOptions)
+				local Handle = self.Handles[Object]
+				if Handle and Handle.Destroyed ~= true and Handle.Target == ESPOptions.Model then
+					if not SettingsMatch(Handle.CurrentSettings, ESPOptions) then
+						Handle:Set(ESPOptions)
+					end
+				else
+					if Handle and Handle.Destroyed ~= true then
+						Handle:Destroy()
+					end
+					self.Handles[Object] = VeloESP.Add(ESPOptions)
+				end
 			end
 		end
 	elseif typeof(Options.ESP) == "table" then
@@ -3102,24 +4289,18 @@ function GeneratedObserver:_ProcessObject(Object)
 		ESPOptions.Model = ESPOptions.Model or Object
 		ESPOptions.Name = Resolve(ESPOptions.Name, Object, ESPOptions.Name or Object.Name)
 		ESPOptions.Color = Resolve(ESPOptions.Color, Object, ESPOptions.Color)
-		self.Handles[Object] = VeloESP.Add(ESPOptions)
+		local Handle = self.Handles[Object]
+		if Handle and Handle.Destroyed ~= true and Handle.Target == ESPOptions.Model then
+			if not SettingsMatch(Handle.CurrentSettings, ESPOptions) then
+				Handle:Set(ESPOptions)
+			end
+		else
+			if Handle and Handle.Destroyed ~= true then
+				Handle:Destroy()
+			end
+			self.Handles[Object] = VeloESP.Add(ESPOptions)
+		end
 	end
-end
-
-function GeneratedObserver:_PopQueue(Queue, HeadKey, TailKey)
-	local Head = self[HeadKey]
-
-	if Head > self[TailKey] then
-		table.clear(Queue)
-		self[HeadKey] = 1
-		self[TailKey] = 0
-		return nil
-	end
-
-	local Object = Queue[Head]
-	Queue[Head] = nil
-	self[HeadKey] = Head + 1
-	return Object
 end
 
 function GeneratedObserver:_Flush()
@@ -3128,21 +4309,20 @@ function GeneratedObserver:_Flush()
 	end
 
 	local MaxPerStep = math.max(1, tonumber(self.Options.MaxPerStep) or 1)
-	local Processed = 0
 
-	while Processed < MaxPerStep do
-		local Object = self:_PopQueue(self.Queue, "QueueHead", "QueueTail")
-		if Object == nil then
-			Object = self:_PopQueue(self.ScanQueue, "ScanQueueHead", "ScanQueueTail")
-		end
+	for _ = 1, MaxPerStep do
+		local Object = self.LiveQueue:Pop() or self.ScanQueue:Pop()
 
 		if Object == nil then
-			break
+			return
 		end
 
-		self.Queued[Object] = nil
-		self:_ProcessObject(Object)
-		Processed += 1
+		
+		
+		if self.Queued[Object] == true then
+			self.Queued[Object] = nil
+			self:_ProcessObject(Object)
+		end
 	end
 end
 
@@ -3150,15 +4330,11 @@ function GeneratedObserver:_Scan()
 	self.ScanGeneration += 1
 	local Generation = self.ScanGeneration
 
-	for Index = self.ScanQueueHead, self.ScanQueueTail do
-		local Object = self.ScanQueue[Index]
-		if Object then
-			self.Queued[Object] = nil
-		end
-	end
-	table.clear(self.ScanQueue)
-	self.ScanQueueHead = 1
-	self.ScanQueueTail = 0
+	local Queued = self.Queued
+	self.ScanQueue:ForEach(function(Object)
+		Queued[Object] = nil
+	end)
+	self.ScanQueue:Clear()
 
 	local ScanBatchSize = math.max(1, tonumber(self.Options.ScanBatchSize) or 200)
 	local Root = self.Root
@@ -3191,12 +4367,8 @@ function GeneratedObserver:SetEnabled(Value)
 		self:_Scan()
 	else
 		self.ScanGeneration += 1
-		table.clear(self.Queue)
-		self.QueueHead = 1
-		self.QueueTail = 0
-		table.clear(self.ScanQueue)
-		self.ScanQueueHead = 1
-		self.ScanQueueTail = 0
+		self.LiveQueue:Clear()
+		self.ScanQueue:Clear()
 		table.clear(self.Queued)
 
 		for Object, Handle in pairs(self.Handles) do
@@ -3222,6 +4394,7 @@ function GeneratedObserver:Destroy()
 	end
 
 	self.Destroyed = true
+	RemoveWatcher(self)
 
 	for _, Connection in ipairs(self.Connections) do
 		if Connection and Connection.Connected then
@@ -3237,12 +4410,8 @@ function GeneratedObserver:Destroy()
 
 	self.ScanGeneration += 1
 	table.clear(self.Connections)
-	table.clear(self.Queue)
-	self.QueueHead = 1
-	self.QueueTail = 0
-	table.clear(self.ScanQueue)
-	self.ScanQueueHead = 1
-	self.ScanQueueTail = 0
+	self.LiveQueue:Clear()
+	self.ScanQueue:Clear()
 	table.clear(self.Queued)
 	table.clear(self.Handles)
 end
@@ -3261,15 +4430,11 @@ function VeloESP.ObserveGenerated(RootObject, Options)
 		Options = Options,
 		Enabled = Options.Enabled ~= false,
 		Destroyed = false,
-		Queue = {},
-		QueueHead = 1,
-		QueueTail = 0,
-		ScanQueue = {},
-		ScanQueueHead = 1,
-		ScanQueueTail = 0,
+		LiveQueue = Queue.new(),
+		ScanQueue = Queue.new(),
 		ScanGeneration = 0,
-		Queued = setmetatable({}, { __mode = "k" }),
-		Handles = setmetatable({}, { __mode = "k" }),
+		Queued = WeakTable(),
+		Handles = WeakTable(),
 		Connections = {},
 	}, GeneratedObserver)
 
@@ -3289,7 +4454,7 @@ function VeloESP.ObserveGenerated(RootObject, Options)
 		Object.Handles[Descendant] = nil
 	end))
 
-	table.insert(Object.Connections, RunService.RenderStepped:Connect(function()
+	table.insert(Object.Connections, RunService.Heartbeat:Connect(function()
 		Object:_Flush()
 	end))
 
@@ -3297,7 +4462,7 @@ function VeloESP.ObserveGenerated(RootObject, Options)
 		Object:_Scan()
 	end
 
-	table.insert(VeloESP._Watchers, Object)
+	RegisterWatcher(Object)
 	return Object
 end
 
@@ -3308,6 +4473,7 @@ function VeloESP.WatchPlayers(Options)
 	local PlayerSettings = DeepCopy(Options or {})
 	local Handles = {}
 	local Connections = {}
+	local CharacterConnections = {}
 	local Controller = {
 		Enabled = PlayerSettings.Enabled ~= false,
 		Destroyed = false,
@@ -3341,9 +4507,12 @@ function VeloESP.WatchPlayers(Options)
 			return
 		end
 
-		table.insert(Connections, Player.CharacterAdded:Connect(function(Character)
+		if CharacterConnections[Player] then
+			CharacterConnections[Player]:Disconnect()
+		end
+		CharacterConnections[Player] = Player.CharacterAdded:Connect(function(Character)
 			AddCharacter(Player, Character)
-		end))
+		end)
 
 		if Player.Character then
 			AddCharacter(Player, Player.Character)
@@ -3355,7 +4524,14 @@ function VeloESP.WatchPlayers(Options)
 	end
 
 	table.insert(Connections, Players.PlayerAdded:Connect(TrackPlayer))
-	table.insert(Connections, Players.PlayerRemoving:Connect(RemovePlayer))
+	table.insert(Connections, Players.PlayerRemoving:Connect(function(Player)
+		RemovePlayer(Player)
+		local Connection = CharacterConnections[Player]
+		if Connection then
+			Connection:Disconnect()
+			CharacterConnections[Player] = nil
+		end
+	end))
 
 	function Controller:SetEnabled(Value)
 		self.Enabled = Value == true
@@ -3395,6 +4571,7 @@ function VeloESP.WatchPlayers(Options)
 		end
 
 		self.Destroyed = true
+		RemoveWatcher(self)
 
 		for _, Connection in ipairs(Connections) do
 			if Connection and Connection.Connected then
@@ -3405,8 +4582,14 @@ function VeloESP.WatchPlayers(Options)
 		for Player in pairs(Handles) do
 			RemovePlayer(Player)
 		end
+		for Player, Connection in pairs(CharacterConnections) do
+			Connection:Disconnect()
+			CharacterConnections[Player] = nil
+		end
+		table.clear(Connections)
 	end
 
+	RegisterWatcher(Controller)
 	return Controller
 end
 
@@ -3415,7 +4598,8 @@ function VeloESP.Destroy()
 		return
 	end
 
-	for _, Watch in ipairs(VeloESP._Watchers) do
+	for Index = #VeloESP._Watchers, 1, -1 do
+		local Watch = VeloESP._Watchers[Index]
 		if Watch and Watch.Destroyed ~= true then
 			Watch:Destroy()
 		end
@@ -3445,34 +4629,69 @@ function VeloESP.Destroy()
 	end
 end
 
+Conflict.Pending = Queue.new()
+Conflict.PendingSet = WeakTable()
+
+local PendingQueue = Conflict.Pending
+local PendingSet = Conflict.PendingSet
+
+local function QueueExternalHighlight(Highlight)
+	if PendingSet[Highlight] ~= nil or HighlightRegistry[Highlight] ~= nil then
+		return
+	end
+
+	PendingSet[Highlight] = true
+	PendingQueue:Push(Highlight)
+end
+
+local function FlushExternalHighlights(Budget)
+	for _ = 1, Budget do
+		local Highlight = PendingQueue:Pop()
+
+		if Highlight == nil then
+			return
+		end
+
+		local IsPending = PendingSet[Highlight] == true
+		PendingSet[Highlight] = nil
+
+		if IsPending and Highlight.Parent ~= nil and Highlight:IsDescendantOf(workspace) then
+			RegisterExternalHighlight(Highlight)
+		end
+	end
+end
+
 task.spawn(function()
-	local Queue = { workspace }
-	local Head, Tail = 1, 1
-	local Visited = 0
-	while Head <= Tail and VeloESP._Destroyed ~= true do
-		local Parent = Queue[Head]
-		Queue[Head] = nil
-		Head += 1
-		for _, Descendant in ipairs(Parent:GetChildren()) do
-			if Descendant:IsA("Highlight") then
-				RegisterExternalHighlight(Descendant)
-			end
-			Tail += 1
-			Queue[Tail] = Descendant
-			Visited += 1
-			if Visited % 200 == 0 then task.wait() end
+	local Descendants = workspace:GetDescendants()
+
+	for Index = 1, #Descendants do
+		if VeloESP._Destroyed then
+			return
+		end
+
+		local Descendant = Descendants[Index]
+
+		if Descendant.ClassName == "Highlight" and VeloESP.Settings.HighlightConflictProtection ~= false then
+			QueueExternalHighlight(Descendant)
+		end
+
+		if Index % 400 == 0 then
+			task.wait()
 		end
 	end
 end)
 
+local ConflictSettings = VeloESP.Settings
+
 table.insert(VeloESP._Connections, workspace.DescendantAdded:Connect(function(Descendant)
-	if Descendant:IsA("Highlight") then
-		RegisterExternalHighlight(Descendant)
+	if Descendant.ClassName == "Highlight" and ConflictSettings.HighlightConflictProtection ~= false then
+		QueueExternalHighlight(Descendant)
 	end
 end))
 
 table.insert(VeloESP._Connections, workspace.DescendantRemoving:Connect(function(Descendant)
-	if Descendant:IsA("Highlight") then
+	if Descendant.ClassName == "Highlight" then
+		PendingSet[Descendant] = nil
 		UnregisterExternalHighlight(Descendant)
 	end
 end))
@@ -3481,10 +4700,89 @@ table.insert(VeloESP._Connections, workspace:GetPropertyChangedSignal("CurrentCa
 	Camera = workspace.CurrentCamera
 end))
 
+local function ReapDeadObjects(Budget)
+	local List = VeloESP._ObjectList
+	local Count = #List
+
+	if Count == 0 then
+		VeloESP._ReapCursor = 1
+		return
+	end
+
+	
+	
+	
+	local SweepFrames = tonumber(VeloESP.Settings.ReapSweepFrames) or 90
+	local Needed = math.ceil(Count / math.max(1, SweepFrames))
+
+	if Needed > Budget then
+		Budget = Needed
+	end
+
+	local Index = VeloESP._ReapCursor or 1
+
+	if Index > Count then
+		Index = 1
+	end
+
+	for _ = 1, math.min(Budget, Count) do
+		local Object = List[Index]
+
+		if Object == nil or Object.Destroyed == true then
+			Index += 1
+		else
+			local Model = Object.CurrentSettings and Object.CurrentSettings.Model
+			local Dead = typeof(Model) ~= "Instance"
+
+			if not Dead then
+				
+				
+				
+				
+				Dead = Model.Parent == nil or not Model:IsDescendantOf(DataModel)
+			end
+
+			if Dead then
+				Object:Destroy()
+				Count = #List
+			else
+				Index += 1
+			end
+		end
+
+		if Count == 0 then
+			Index = 1
+			break
+		end
+
+		if Index > Count then
+			Index = 1
+		end
+	end
+
+	VeloESP._ReapCursor = Index
+end
+
+table.insert(VeloESP._Connections, RunService.Heartbeat:Connect(function()
+	if VeloESP._Destroyed then
+		return
+	end
+	local Settings = VeloESP.Settings
+	FlushExternalHighlights(tonumber(Settings.HighlightScanPerFrame) or 24)
+	ReapDeadObjects(tonumber(Settings.ReapPerFrame) or 6)
+end))
+
 table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(DeltaTime)
 	if VeloESP._Destroyed then
 		return
 	end
+
+	local Settings = VeloESP.Settings
+	VeloESP._Elapsed += DeltaTime
+	local Elapsed = VeloESP._Elapsed
+
+	Screen.BeginFrame()
+	VeloESP._AnyOverlay = RefreshActiveOverlays()
 
 	local ObjectList = VeloESP._UpdateList
 	local Count = #ObjectList
@@ -3494,15 +4792,14 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 		return
 	end
 
-	if VeloESP.Settings.Rainbow then
+	if Settings.Rainbow then
 		VeloESP._RainbowColor = Color3.fromHSV(
-			(os.clock() * VeloESP.Settings.RainbowSpeed) % 1,
-			VeloESP.Settings.RainbowSaturation,
-			VeloESP.Settings.RainbowValue
+			(os.clock() * Settings.RainbowSpeed) % 1,
+			Settings.RainbowSaturation,
+			Settings.RainbowValue
 		)
 	end
 
-	local Settings = VeloESP.Settings
 	local RateCache = VeloESP._RateCache
 
 	if RateCache == nil then
@@ -3514,6 +4811,7 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 	RateCache[2] = tonumber(Settings.FarDistance) or 650
 	RateCache[3] = tonumber(Settings.FarUpdateRate) or 0
 	RateCache[4] = tonumber(Settings.NearUpdateRate) or 0
+	VeloESP._AnyRateLimit = RateCache[1] > 0 or RateCache[3] > 0 or RateCache[4] > 0
 
 	local MaxPerFrame = tonumber(Settings.MaxPerFrame) or math.huge
 	local FrameBudget = tonumber(Settings.FrameBudget) or 0
@@ -3522,13 +4820,14 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 	local BudgetCounter = 0
 	local Updated = 0
 	local Visited = 0
+	local VisitLimit = Count
 	local Index = VeloESP._UpdateCursor or 1
 
 	if Index > Count then
 		Index = 1
 	end
 
-	while Visited < Count do
+	while Visited < VisitLimit and Count > 0 do
 		local Object = ObjectList[Index]
 		Visited += 1
 
@@ -3550,9 +4849,21 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 			end
 		else
 			Object._UpdateListIndex = Index
-			Object:_Update(DeltaTime)
+			local ObjectDelta = Elapsed - (Object._LastUpdateTime or (Elapsed - DeltaTime))
+			Object._LastUpdateTime = Elapsed
+			Object:_Update(ObjectDelta)
 			Updated += 1
-			Index += 1
+			
+			
+			
+			Count = #ObjectList
+			if ObjectList[Index] == Object then
+				Index += 1
+			end
+			if Count == 0 then
+				Index = 1
+				break
+			end
 
 			if Index > Count then
 				Index = 1
@@ -3578,11 +4889,13 @@ table.insert(VeloESP._Connections, RunService.RenderStepped:Connect(function(Del
 
 	VeloESP._UpdateCursor = Index
 
-	for Object in pairs(VeloESP._SmoothObjects) do
-		if Object.Destroyed == true then
-			VeloESP._SmoothObjects[Object] = nil
-		else
-			Object:_PresentOverlays(DeltaTime)
+	if next(VeloESP._SmoothObjects) ~= nil then
+		for Object in pairs(VeloESP._SmoothObjects) do
+			if Object.Destroyed == true then
+				VeloESP._SmoothObjects[Object] = nil
+			else
+				Object:_PresentOverlays(DeltaTime)
+			end
 		end
 	end
 end))
